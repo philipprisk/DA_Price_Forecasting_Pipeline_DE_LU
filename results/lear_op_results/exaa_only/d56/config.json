@@ -1,0 +1,12 @@
+{
+  "experiment_name": "lear_exaa_only_d56",
+  "use_exaa": true,
+  "use_exaa_only": true,
+  "n_clusters": null,
+  "weather_source": null,
+  "train_days": 56,
+  "use_vst": true,
+  "lars_start_date": "2025-12-01",
+  "test_start": "2025-10-01",
+  "test_end": "2026-02-28"
+}

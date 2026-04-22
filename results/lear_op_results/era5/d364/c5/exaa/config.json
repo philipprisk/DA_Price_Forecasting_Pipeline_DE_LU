@@ -1,0 +1,12 @@
+{
+  "experiment_name": "lear_era5_d364_c5_exaa",
+  "weather_source": "ERA5",
+  "use_exaa": true,
+  "use_exaa_only": false,
+  "n_clusters": 5,
+  "train_days": 364,
+  "use_vst": true,
+  "lars_start_date": "2026-12-01",
+  "test_start": "2025-10-01",
+  "test_end": "2026-02-28"
+}

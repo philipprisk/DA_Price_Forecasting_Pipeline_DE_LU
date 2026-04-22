@@ -1,0 +1,12 @@
+{
+  "experiment_name": "lear_dwd_d56_c5_fundamental",
+  "weather_source": "DWD",
+  "use_exaa": false,
+  "use_exaa_only": false,
+  "n_clusters": 5,
+  "train_days": 56,
+  "use_vst": true,
+  "lars_start_date": "2025-12-01",
+  "test_start": "2025-10-01",
+  "test_end": "2026-02-28"
+}
