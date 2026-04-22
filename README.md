@@ -4,6 +4,8 @@ This repository contains the complete forecasting pipeline accompanying the bach
 
 The pipeline generates probabilistic day-ahead electricity price forecasts for the EPEX DE-LU bidding zone at 15-minute resolution (96 MTUs per day), combining LEAR point forecasting with SQRA probabilistic post-processing. All input data are sourced exclusively from open-access, automatically retrievable data sources available before the EPEX DE-LU auction closure at 12:00 CET.
 
+> **Note**: The current implementation is research-oriented rather than fully operational. Individual pipeline stages require manual execution. Full automation represents the most immediate direction for future work, as discussed in the thesis.
+
 ## Forecast Configurations
 
 Three configurations are supported, reflecting different information sets and publication times:
