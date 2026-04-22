@@ -1,4 +1,4 @@
-# DA Price Forecasting Pipeline DE-LU
+# Day-Ahead Price Forecasting Pipeline DE-LU
 
 This repository contains the complete forecasting pipeline accompanying the bachelor thesis *"An Open-Source Probabilistic Forecasting Pipeline for German Day-Ahead Prices"* at the Karlsruhe Institute of Technology (KIT).
 
