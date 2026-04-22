@@ -13,6 +13,8 @@ Three configurations are supported, reflecting different information sets and pu
 - **EXAA-Only Model**: Uses exclusively EXAA prices as input features while retaining all pipeline transformations. Recommended configuration once EXAA prices are available.
 
 ## Repository Structure
+
+```text
 DA_Price_Forecasting_Pipeline_DE_LU/
 ├── data/                  # Clustering files and spatial data (shapefiles)
 ├── pipeline/
@@ -22,6 +24,8 @@ DA_Price_Forecasting_Pipeline_DE_LU/
 ├── requirements/          # Per-module requirements files
 ├── results/               # Forecast outputs and evaluation metrics
 └── visualization/         # Plotting scripts
+```
+
 ## Data
 
 The pipeline requires the following external data sources:
