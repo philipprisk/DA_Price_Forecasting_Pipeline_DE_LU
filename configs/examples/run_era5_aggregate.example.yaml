@@ -1,0 +1,18 @@
+kind: era5_aggregate
+config:
+  repo_root: "."
+  main_file: data/raw/era5/era5_main.grib
+  solar_file: data/raw/era5/era5_solar.grib
+  cluster_file: data/clustering/icon_d2_clustering_c25.parquet
+  output_parent: data/processed/era5_aggregated
+  main_variables:
+    - u10
+    - v10
+    - t2m
+    - sp
+    - sd
+  solar_variables:
+    - ssrd
+    - fdir
+  start_time: "2026-01-01 00:00"
+  end_time: "2026-04-23 23:45"

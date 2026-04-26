@@ -1,0 +1,26 @@
+kind: tabpfn_ts
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+  entsoe_start_date: "2025-01-01T00:00:00+01:00"
+  entsoe_end_date: "2026-04-23T23:45:00+02:00"
+  test_start: "2026-04-16T00:00:00+02:00"
+  test_end: "2026-04-23T23:45:00+02:00"
+  forecast_horizon: 96
+  frequency: 15min
+  quantiles:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 0.9
+  use_exaa: true
+  use_load_forecast: true
+  max_context_length: 4096
+  tabpfn_mode: client
+  tabpfn_output_selection: median
+  disable_telemetry: true
+  experiment_name: tabpfn_ts_exaa_load_client
+  export_dir: results/tabpfn_ts_results/exaa_load_client

@@ -1,0 +1,13 @@
+kind: era5_download
+config:
+  repo_root: "."
+  start_date: "2026-01-01"
+  end_date: "2026-04-23"
+  output_dir: data/raw/era5
+  area:
+    - 56.0
+    - 2.0
+    - 46.0
+    - 17.0
+  force: false
+  append_missing: false

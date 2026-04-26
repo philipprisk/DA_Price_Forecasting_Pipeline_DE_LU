@@ -1,39 +1,52 @@
-# Python
+# Python build/cache artifacts
 __pycache__/
 *.py[cod]
 *.pyo
-.Python
 *.egg-info/
-dist/
 build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Virtual environments
-.venv/
-venv/
-env/
+# Local environments
+.pixi/
+.venv*/
+.venvs/
+venv*/
+env*/
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-evaluation/
+# Local secrets and machine-specific config
+.env
+.env.*
+!.env.example
+configs/*.json
+configs/*.yaml
+configs/*.yml
 
-# Data files (too large for repository)
-data/lear_forecasts/
-data/anc_results/
-data/anc/
+# Large/generated data
+data/raw/
+data/processed/*
+!data/processed/.gitkeep
+*.grib
+*.idx
 
-# Output
+# Local model weights and package caches
+.cache/
+*.ckpt
+
+# Generated experiment/report artifacts
+results/*
+!results/.gitkeep
 output/*
 !output/.gitkeep
+!output/figures/
+output/figures/*
+!output/figures/.gitkeep
 
-# OS
+# Jupyter/editor/OS noise
+.ipynb_checkpoints/
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
-
-# IDE
-.vscode/settings.json
-.idea/
-
-# Credentials
-*.env
-.env

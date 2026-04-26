@@ -1,0 +1,52 @@
+kind: energy_arena_submit
+submit: false
+config:
+  repo_root: "."
+  source:
+    kind: lear_operational
+    run_before_submit: true
+    config:
+      repo_root: "."
+      target_tz: Europe/Berlin
+      post_regime_start: "2025-10-01T00:00:00+02:00"
+      country_code_entsoe: DE_LU
+      entsoe_api_key_env: ENTSOE_API_KEY
+      entsoe_start_date: "2024-01-01T00:00:00+01:00"
+      entsoe_end_date: "2026-04-23T00:00:00+02:00"
+      era5_dirs:
+        - data/processed/era5_aggregated
+      icon_dir: data/processed/icon_aggregated
+      dwd_folder_offset_date: "2025-10-26"
+      start_folder_date: "2025-08-01"
+      required_run: "09"
+      skip_dates:
+        - "2025-10-26"
+        - "2025-10-27"
+        - "2025-10-28"
+      use_vst: true
+      weather_source: DWD
+      variant: exaa_only
+      lars_start_date: "2025-12-01T00:00:00+01:00"
+      test_start: "2026-04-25T00:00:00+02:00"
+      test_end: "2026-04-25T23:45:00+02:00"
+      train_days_rolling: 56
+      n_clusters: 5
+      export_dir: results/lear_op_results/exaa_only/energy_arena_base
+  forecast_date: "2026-04-25"
+  challenge_id: 2
+  target_tz: Europe/Berlin
+  objective: point
+  value_column: y_pred
+  api_base_url: https://api.energy-arena.org
+  submit_url: null
+  api_key_env: ENERGY_ARENA_API_KEY
+  api_key_header_name: X-API-Key
+  api_key_prefix: ""
+  forecast_visibility: closed
+  leaderboard_visibility: public
+  approach_name: lear_exaa_only
+  approach_description: LEAR exaa-only point forecast exported from the modular DE-LU pipeline.
+  repo_url: null
+  payload_template_path: configs/examples/energy_arena_dense_payload_template.example.json
+  artifacts_dir: results/energy_arena_submissions
+  request_timeout_seconds: 30

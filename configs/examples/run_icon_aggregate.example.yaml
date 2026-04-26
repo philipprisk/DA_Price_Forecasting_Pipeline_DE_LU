@@ -1,0 +1,21 @@
+kind: icon_aggregate
+config:
+  repo_root: "."
+  lsdf_base: /Volumes/iip-projects/energy/climateData/icon_by_Max_Kleinebrahm
+  output_parent: data/processed/icon_aggregated
+  shapefile_path: data/shapefile/ne_10m_admin_0_countries.shp
+  n_clusters: 5
+  buffer_km: 50
+  plot_clusters: false
+  skip_existing_output: true
+  only_day: null
+  only_run_hour: "09"
+  start_date: "2026-01-03"
+  variables:
+    - t_2m
+    - p
+    - u_10m
+    - v_10m
+    - aswdir_s
+    - aswdifd_s
+    - h_snow

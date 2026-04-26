@@ -1,0 +1,39 @@
+kind: tabpfn_local
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+  entsoe_start_date: "2025-01-01T00:00:00+01:00"
+  entsoe_end_date: "2026-04-23T23:45:00+02:00"
+  test_start: "2026-04-16T00:00:00+02:00"
+  test_end: "2026-04-23T23:45:00+02:00"
+  post_regime_start: "2025-10-01T00:00:00+02:00"
+  forecast_horizon: 96
+  frequency: 15min
+  quantiles:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 0.9
+  use_exaa: true
+  use_load_forecast: true
+  price_lag_days:
+    - 1
+    - 2
+    - 7
+  add_calendar_features: true
+  train_window_days: 180
+  max_train_rows: 1000
+  n_estimators: 4
+  device: cpu
+  fit_mode: low_memory
+  n_preprocessing_jobs: 1
+  inference_precision: auto
+  ignore_pretraining_limits: false
+  point_output_type: median
+  predict_batch_size: 16
+  random_state: 0
+  experiment_name: tabpfn_local_exaa_load_lags_d1_d2_d7_n1000_cpu
+  export_dir: results/tabpfn_local_results/exaa_load_lags_d1_d2_d7_n1000_cpu

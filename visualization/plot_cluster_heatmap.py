@@ -20,14 +20,15 @@ Inputs
 
 Output
 ------
-- output/anc_heatmap_wind.pdf
-- output/anc_heatmap_solar.pdf
+- output/figures/anc_heatmap_wind.pdf
+- output/figures/anc_heatmap_solar.pdf
 """
 
 # ===============================================================
 # IMPORTS
 # ===============================================================
 from pathlib import Path
+import argparse
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,7 @@ ANC_SOLAR_PATH = BASE_DIR / "results" / "lear_anc_results" / "era5" / "c5" / "d1
 SHAPEFILE_PATH = BASE_DIR / "data" / "shapefile" / "ne_10m_admin_0_countries.shp"
 
 # Output paths
-OUTPUT_DIR        = BASE_DIR / "output"
+OUTPUT_DIR        = BASE_DIR / "output" / "figures"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_WIND_PATH  = OUTPUT_DIR / "anc_heatmap_wind.pdf"
 OUTPUT_SOLAR_PATH = OUTPUT_DIR / "anc_heatmap_solar.pdf"
@@ -295,26 +296,38 @@ def plot_anc_heatmap(
 # ===============================================================
 
 def main():
+    parser = argparse.ArgumentParser(description="Plot ANC cluster heatmaps from modular ANC artifacts.")
+    parser.add_argument("--cluster-parquet", type=Path, default=PARQUET_PATH)
+    parser.add_argument("--anc-wind", type=Path, default=ANC_WIND_PATH)
+    parser.add_argument("--anc-solar", type=Path, default=ANC_SOLAR_PATH)
+    parser.add_argument("--shapefile", type=Path, default=SHAPEFILE_PATH)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--train-days", type=int, default=TRAIN_DAYS)
+    args = parser.parse_args()
+
+    output_wind_path = args.output_dir / "anc_heatmap_wind.pdf"
+    output_solar_path = args.output_dir / "anc_heatmap_solar.pdf"
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print("📂 Loading cluster polygons ...")
-    cluster_gdf = build_cluster_polygons(PARQUET_PATH)
+    cluster_gdf = build_cluster_polygons(args.cluster_parquet)
 
     print("🗺️  Loading Germany outline ...")
-    germany = load_germany(SHAPEFILE_PATH, target_crs=cluster_gdf.crs)
+    germany = load_germany(args.shapefile, target_crs=cluster_gdf.crs)
 
     # --------------------------------------------------
     # Wind Heatmap
     # --------------------------------------------------
-    print(f"\n💨 Wind ANC Heatmap (train_days={TRAIN_DAYS}) ...")
-    anc_wind = load_anc(ANC_WIND_PATH, train_days=TRAIN_DAYS)
+    print(f"\n💨 Wind ANC Heatmap (train_days={args.train_days}) ...")
+    anc_wind = load_anc(args.anc_wind, train_days=args.train_days)
     print(anc_wind.to_string(index=False))
 
     plot_anc_heatmap(
         cluster_gdf=cluster_gdf,
         anc_df=anc_wind,
         germany=germany,
-        title=f"Wind Cluster Importance by ANC (train_days={TRAIN_DAYS})",
-        output_path=OUTPUT_WIND_PATH,
+        title=f"Wind Cluster Importance by ANC (train_days={args.train_days})",
+        output_path=output_wind_path,
         cmap=CMAP_WIND,
         dpi=DPI,
     )
@@ -322,16 +335,16 @@ def main():
     # --------------------------------------------------
     # Solar Heatmap
     # --------------------------------------------------
-    print(f"\n☀️  Solar ANC Heatmap (train_days={TRAIN_DAYS}) ...")
-    anc_solar = load_anc(ANC_SOLAR_PATH, train_days=TRAIN_DAYS)
+    print(f"\n☀️  Solar ANC Heatmap (train_days={args.train_days}) ...")
+    anc_solar = load_anc(args.anc_solar, train_days=args.train_days)
     print(anc_solar.to_string(index=False))
 
     plot_anc_heatmap(
         cluster_gdf=cluster_gdf,
         anc_df=anc_solar,
         germany=germany,
-        title=f"Solar Cluster Importance by ANC (train_days={TRAIN_DAYS})",
-        output_path=OUTPUT_SOLAR_PATH,
+        title=f"Solar Cluster Importance by ANC (train_days={args.train_days})",
+        output_path=output_solar_path,
         cmap=CMAP_SOLAR,
         dpi=DPI,
     )

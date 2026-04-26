@@ -19,15 +19,19 @@ Three tables are produced:
 Expected repository layout
 --------------------------
 repo/
-├── output/              (created automatically if missing)
+├── output/figures/      (created automatically if missing)
 └── visualization/
     └── generate_mae_tables.py
 """
 
+from pathlib import Path
+import argparse
+import glob
+
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
-from pathlib import Path
+import pandas as pd
 
 # ============================================================
 #  ENTER MEASUREMENTS HERE
@@ -423,14 +427,122 @@ def make_exaa_only_figure(data, filename, vmin, vmax, cmap_minval, cmap_maxval):
     print(f"Saved: {filename}")
 
 
+def _resolve_artifact_dirs(patterns):
+    dirs = []
+    for pattern in patterns:
+        for match in glob.glob(str(pattern), recursive=True):
+            path = Path(match)
+            if path.is_file() and path.name == "metrics.csv":
+                dirs.append(path.parent)
+            elif path.is_dir() and (path / "metrics.csv").exists():
+                dirs.append(path)
+    return sorted(set(dirs))
+
+
+def _metric_value(metrics: pd.DataFrame, name: str) -> float:
+    row = metrics.loc[metrics["metric"] == name, "value"]
+    return float(row.iloc[0]) if not row.empty else np.nan
+
+
+def _metrics_tuple(artifact_dir: Path) -> tuple[float, float]:
+    metrics = pd.read_csv(artifact_dir / "metrics.csv")
+    if {"metric", "value"}.issubset(metrics.columns):
+        return (_metric_value(metrics, "mae"), _metric_value(metrics, "rmse"))
+    if {"mae", "rmse"}.issubset(metrics.columns):
+        if "period" in metrics.columns and (metrics["period"] == "full").any():
+            row = metrics.loc[metrics["period"] == "full"].iloc[0]
+        else:
+            row = metrics.iloc[0]
+        return (float(row["mae"]), float(row["rmse"]))
+    if "MAE (median)" in metrics.columns:
+        return (float(metrics["MAE (median)"].dropna().astype(float).mean()), np.nan)
+    raise ValueError(
+        f"{artifact_dir / 'metrics.csv'} must contain metric/value rows, mae/rmse columns, or MAE (median)."
+    )
+
+
+def _artifact_label(artifact_dir: Path) -> str:
+    config_path = artifact_dir / "config.json"
+    if config_path.exists():
+        try:
+            import json
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            return str(config.get("experiment_name") or artifact_dir.name).replace("_", "\\_")
+        except Exception:
+            pass
+    return artifact_dir.name.replace("_", "\\_")
+
+
+def make_artifact_mae_figure(artifact_dirs: list[Path], filename: Path) -> None:
+    data = np.array([[_metrics_tuple(path)] for path in artifact_dirs], dtype=object)
+    labels = [_artifact_label(path) for path in artifact_dirs]
+    mae, rmse = extract(data)
+    vals = mae[np.isfinite(mae)]
+    vmin = float(vals.min()) if len(vals) else 0.0
+    vmax = float(vals.max()) if len(vals) else 1.0
+    if vmin == vmax:
+        vmax = vmin + 1.0
+    cmap_obj = truncated_cmap("RdYlGn_r", 0.25, 0.75)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    n_rows, n_cols = mae.shape
+    fig_h = max(2.0, n_rows * 0.52 + 0.7)
+    fig, ax = plt.subplots(figsize=(4.2, fig_h))
+    fig.subplots_adjust(left=0.08, right=0.78, top=0.88, bottom=0.08)
+
+    draw_cells(ax, mae, rmse, norm, cmap_obj)
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(0, n_rows)
+    ax.set_xticks([0.5])
+    ax.set_xticklabels(["MAE"], fontsize=11)
+    ax.xaxis.set_tick_params(length=0)
+    ax.set_yticks([])
+    for i, label in enumerate(labels):
+        ax.text(-0.08, n_rows - i - 0.5, label, ha="right", va="center", fontsize=9, transform=ax.transData)
+    ax.set_frame_on(False)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.08, pad=0.04)
+    cbar.set_label("MAE (€/MWh)", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(filename, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {filename}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate MAE/RMSE tables.")
+    parser.add_argument(
+        "--artifacts",
+        nargs="+",
+        help="Artifact directories or glob patterns containing metrics.csv. If omitted, built-in thesis tables are used.",
+    )
+    parser.add_argument("--output", type=Path, default=None, help="Output PDF path for artifact mode.")
+    return parser
+
+
 # ============================================================
 #  SEPARATE COLOUR SCALES & RUN
 # ============================================================
 
 if __name__ == "__main__":
+    args = build_parser().parse_args()
     _HERE = Path(__file__).parent.parent  # points to repository root
-    _OUT  = _HERE / "output"
+    _OUT  = _HERE / "output" / "figures"
     _OUT.mkdir(parents=True, exist_ok=True)
+
+    if args.artifacts:
+        artifact_dirs = _resolve_artifact_dirs(args.artifacts)
+        if not artifact_dirs:
+            raise SystemExit("No artifact directories with metrics.csv found.")
+        make_artifact_mae_figure(
+            artifact_dirs=artifact_dirs,
+            filename=args.output or (_OUT / "mae_artifacts.pdf"),
+        )
+        raise SystemExit(0)
 
     vmin_fundamental, vmax_fundamental = get_vmin_vmax(lear_fundamental)
     vmin_exaa,    vmax_exaa    = get_vmin_vmax(lear_exaa_enriched)

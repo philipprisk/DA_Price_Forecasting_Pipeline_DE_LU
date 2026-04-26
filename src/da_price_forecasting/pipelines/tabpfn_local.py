@@ -1,0 +1,414 @@
+from __future__ import annotations
+
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+
+from ..config import TabpfnLocalConfig
+from .tabpfn_ts import _as_target_tz_timestamp, _compute_metrics
+
+
+def _load_env(repo_root: Path) -> None:
+    load_dotenv(repo_root / ".env")
+
+
+def _require_tabpfn_regressor():
+    try:
+        from tabpfn import TabPFNRegressor
+    except ImportError as exc:
+        raise ImportError(
+            "tabpfn is not installed. Install the TabPFN environment with "
+            "`pixi install -e tabpfn` or run the command via `pixi run -e tabpfn ...`."
+        ) from exc
+
+    return TabPFNRegressor
+
+
+def _require_entsoe_fetchers():
+    try:
+        from ..data.entsoe import fetch_load_forecast, fetch_prices, fetch_prices_exaa
+    except ImportError as exc:
+        raise ImportError(
+            "entsoe-py is not installed. Install the TabPFN environment with "
+            "`pixi install -e tabpfn` or run the command via `pixi run -e tabpfn ...`."
+        ) from exc
+
+    return fetch_prices, fetch_prices_exaa, fetch_load_forecast
+
+
+def _forecast_days(config: TabpfnLocalConfig) -> pd.DatetimeIndex:
+    start = _as_target_tz_timestamp(config.test_start, config.target_tz).normalize()
+    end = _as_target_tz_timestamp(config.test_end, config.target_tz).normalize()
+    return pd.date_range(start=start, end=end, freq="D")
+
+
+def _build_calendar_features(index: pd.DatetimeIndex, config: TabpfnLocalConfig) -> pd.DataFrame:
+    local_index = index.tz_convert(config.target_tz) if index.tz is not None else index.tz_localize(config.target_tz)
+    minute_of_day = local_index.hour * 60 + local_index.minute
+    mtu = local_index.hour * 4 + local_index.minute // 15
+    dayofweek = local_index.dayofweek
+    month = local_index.month
+    dayofyear = local_index.dayofyear
+    post_regime_start = _as_target_tz_timestamp(config.post_regime_start, config.target_tz)
+
+    features = pd.DataFrame(index=index)
+    features["mtu"] = mtu.astype(float)
+    features["hour"] = local_index.hour.astype(float)
+    features["dayofweek"] = dayofweek.astype(float)
+    features["month"] = month.astype(float)
+    features["is_weekend"] = (dayofweek >= 5).astype(float)
+    features["is_15min_market"] = (local_index >= post_regime_start).astype(float)
+    features["mtu_sin"] = np.sin(2 * np.pi * mtu / 96)
+    features["mtu_cos"] = np.cos(2 * np.pi * mtu / 96)
+    features["minute_of_day_sin"] = np.sin(2 * np.pi * minute_of_day / 1440)
+    features["minute_of_day_cos"] = np.cos(2 * np.pi * minute_of_day / 1440)
+    features["dow_sin"] = np.sin(2 * np.pi * dayofweek / 7)
+    features["dow_cos"] = np.cos(2 * np.pi * dayofweek / 7)
+    features["month_sin"] = np.sin(2 * np.pi * month / 12)
+    features["month_cos"] = np.cos(2 * np.pi * month / 12)
+    features["dayofyear_sin"] = np.sin(2 * np.pi * dayofyear / 366)
+    features["dayofyear_cos"] = np.cos(2 * np.pi * dayofyear / 366)
+    return features
+
+
+def _build_price_lag_features(
+    prices: pd.DataFrame,
+    index: pd.DatetimeIndex,
+    lag_days: list[int],
+    target_tz: str,
+) -> pd.DataFrame:
+    if "price_da" not in prices.columns:
+        raise ValueError("Price DataFrame must contain a 'price_da' column.")
+
+    base = prices["price_da"].sort_index().tz_convert("UTC")
+    features = pd.DataFrame(index=index)
+    for lag_day in lag_days:
+        lagged = base.shift(freq=f"{int(lag_day)}D").tz_convert(target_tz)
+        features[f"price_lag{int(lag_day)}d"] = lagged.reindex(index).astype(float)
+    return features
+
+
+def build_tabpfn_local_features(
+    index: pd.DatetimeIndex,
+    prices: pd.DataFrame,
+    covariates: pd.DataFrame,
+    config: TabpfnLocalConfig,
+) -> pd.DataFrame:
+    """Build supervised tabular rows for the local TabPFN regressor."""
+    frames: list[pd.DataFrame] = []
+    if config.add_calendar_features:
+        frames.append(_build_calendar_features(index, config))
+    if config.price_lag_days:
+        frames.append(_build_price_lag_features(prices, index, config.price_lag_days, config.target_tz))
+    if not covariates.empty:
+        frames.append(covariates.reindex(index).astype(float))
+
+    if not frames:
+        raise ValueError("No features configured for local TabPFN.")
+
+    features = pd.concat(frames, axis=1)
+    features = features.loc[:, ~features.columns.duplicated()].sort_index()
+    features.index.name = "timestamp"
+    return features
+
+
+def _build_covariates(config: TabpfnLocalConfig, start_day: pd.Timestamp, end_day: pd.Timestamp) -> pd.DataFrame:
+    _, fetch_prices_exaa, fetch_load_forecast = _require_entsoe_fetchers()
+
+    frames = []
+    if config.use_exaa:
+        frames.append(
+            fetch_prices_exaa(
+                start_day=start_day,
+                end_day=end_day,
+                country_code=config.country_code_entsoe,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+            )
+        )
+    if config.use_load_forecast:
+        frames.append(
+            fetch_load_forecast(
+                start_day=start_day,
+                end_day=end_day,
+                country_code=config.country_code_entsoe,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+            )
+        )
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, axis=1).sort_index()
+
+
+def _training_frame_for_day(
+    feature_frame: pd.DataFrame,
+    prices: pd.DataFrame,
+    forecast_day: pd.Timestamp,
+    config: TabpfnLocalConfig,
+) -> tuple[pd.DataFrame, pd.Series]:
+    y = prices["price_da"].reindex(feature_frame.index).astype(float)
+    mask = feature_frame.index < forecast_day
+    if config.train_window_days is not None:
+        mask &= feature_frame.index >= forecast_day - pd.Timedelta(days=config.train_window_days)
+
+    train = feature_frame.loc[mask].copy()
+    y_train = y.loc[train.index].copy()
+    valid = y_train.notna()
+    train = train.loc[valid]
+    y_train = y_train.loc[valid]
+
+    if config.max_train_rows is not None and len(train) > config.max_train_rows:
+        train = train.tail(config.max_train_rows)
+        y_train = y_train.tail(config.max_train_rows)
+
+    if train.empty:
+        raise ValueError(f"No local TabPFN training rows available before {forecast_day.date()}.")
+
+    return train, y_train
+
+
+def _prepare_model_matrices(
+    train: pd.DataFrame,
+    future: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    train = train.replace([np.inf, -np.inf], np.nan)
+    future = future.replace([np.inf, -np.inf], np.nan)
+    medians = train.median(numeric_only=True).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    train_prepared = train.fillna(medians).fillna(0.0)
+    future_prepared = future.fillna(medians).fillna(0.0)
+    return train_prepared.astype(float), future_prepared.astype(float)
+
+
+def _new_regressor(config: TabpfnLocalConfig):
+    TabPFNRegressor = _require_tabpfn_regressor()
+    return TabPFNRegressor(
+        n_estimators=config.n_estimators,
+        device=config.device,
+        ignore_pretraining_limits=config.ignore_pretraining_limits,
+        inference_precision=config.inference_precision,
+        fit_mode=config.fit_mode,
+        random_state=config.random_state,
+        n_preprocessing_jobs=config.n_preprocessing_jobs,
+    )
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    name = exc.__class__.__name__.lower()
+    return "outofmemory" in name or "out of memory" in message or "oom" in message
+
+
+def _predict_main(
+    model: Any,
+    x_future: pd.DataFrame,
+    quantiles: list[float],
+    batch_size: int | None,
+) -> dict[str, Any]:
+    if batch_size is None or batch_size <= 0 or batch_size >= len(x_future):
+        return model.predict(
+            x_future,
+            output_type="main",
+            quantiles=[float(tau) for tau in quantiles],
+        )
+
+    chunks = []
+    for start in range(0, len(x_future), batch_size):
+        chunks.append(
+            model.predict(
+                x_future.iloc[start : start + batch_size],
+                output_type="main",
+                quantiles=[float(tau) for tau in quantiles],
+            )
+        )
+
+    return {
+        "mean": np.concatenate([np.asarray(chunk["mean"], dtype=float) for chunk in chunks]),
+        "median": np.concatenate([np.asarray(chunk["median"], dtype=float) for chunk in chunks]),
+        "mode": np.concatenate([np.asarray(chunk["mode"], dtype=float) for chunk in chunks]),
+        "quantiles": [
+            np.concatenate([np.asarray(chunk["quantiles"][idx], dtype=float) for chunk in chunks])
+            for idx, _ in enumerate(quantiles)
+        ],
+    }
+
+
+def _local_tabpfn_oom_message() -> str:
+    return (
+        "Local TabPFN ran out of memory even when predicting one row at a time. "
+        "That means the training/context set is too large for the selected device. "
+        "Reduce `max_train_rows`, set `device` to `cpu`, lower `n_estimators`, or shorten "
+        "`train_window_days` in the local TabPFN config."
+    )
+
+
+def _is_cpu_large_dataset_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "running on cpu with more than 1000 samples" in message
+
+
+def _local_tabpfn_fit_error_message() -> str:
+    return (
+        "Local TabPFN refused the configured CPU training set because it has more than "
+        "1000 samples. Set `max_train_rows` to 1000 or lower for the conservative CPU "
+        "path. If you intentionally want a slower large-CPU run, set "
+        "`ignore_pretraining_limits` to true or export TABPFN_ALLOW_CPU_LARGE_DATASET=1."
+    )
+
+
+def _prediction_frame(
+    model: Any,
+    x_future: pd.DataFrame,
+    future_index: pd.DatetimeIndex,
+    y_true: pd.Series | None,
+    config: TabpfnLocalConfig,
+) -> pd.DataFrame:
+    try:
+        predictions = _predict_main(model, x_future, config.quantiles, config.predict_batch_size)
+    except Exception as exc:
+        if config.predict_batch_size is not None and config.predict_batch_size > 1 and _is_oom_error(exc):
+            try:
+                predictions = _predict_main(model, x_future, config.quantiles, 1)
+            except Exception as retry_exc:
+                if _is_oom_error(retry_exc):
+                    raise RuntimeError(_local_tabpfn_oom_message()) from retry_exc
+                raise
+        elif _is_oom_error(exc):
+            raise RuntimeError(_local_tabpfn_oom_message()) from exc
+        else:
+            raise
+
+    result = pd.DataFrame(index=future_index)
+    result["y_pred"] = np.asarray(predictions[config.point_output_type], dtype=float)
+
+    quantile_predictions = predictions["quantiles"]
+    for tau, values in zip(config.quantiles, quantile_predictions, strict=True):
+        result[f"q{tau:.3f}"] = np.asarray(values, dtype=float)
+
+    if y_true is not None:
+        result["y_true"] = y_true.reindex(future_index).astype(float)
+    else:
+        result["y_true"] = np.nan
+    return result
+
+
+def run_tabpfn_local_pipeline(config: TabpfnLocalConfig, save_outputs: bool = True) -> dict[str, Any]:
+    """Run a local TabPFN tabular regressor as a rate-limit-free benchmark."""
+    _load_env(config.repo_root)
+    fetch_prices, _, _ = _require_entsoe_fetchers()
+
+    entsoe_start = _as_target_tz_timestamp(config.entsoe_start_date, config.target_tz)
+    price_end = _as_target_tz_timestamp(config.entsoe_end_date, config.target_tz)
+    test_end = _as_target_tz_timestamp(config.test_end, config.target_tz)
+    covariate_end = max(price_end, test_end)
+
+    prices = fetch_prices(
+        start_day=entsoe_start,
+        end_day=price_end,
+        country_code=config.country_code_entsoe,
+        api_key_env=config.entsoe_api_key_env,
+        target_tz=config.target_tz,
+    )
+    covariates = _build_covariates(config, entsoe_start, covariate_end)
+
+    feature_start = prices.index.min()
+    feature_end = max(prices.index.max(), covariates.index.max() if not covariates.empty else prices.index.max(), test_end)
+    feature_index = pd.date_range(start=feature_start, end=feature_end, freq=config.frequency, tz=config.target_tz)
+    feature_frame = build_tabpfn_local_features(feature_index, prices, covariates, config)
+
+    all_forecasts = []
+    runtime_records = []
+    for forecast_day in _forecast_days(config):
+        start_time = time.perf_counter()
+        future_index = pd.date_range(start=forecast_day, periods=config.forecast_horizon, freq=config.frequency)
+
+        train, y_train = _training_frame_for_day(feature_frame, prices, forecast_day, config)
+        future = feature_frame.reindex(future_index)
+        x_train, x_future = _prepare_model_matrices(train, future)
+
+        model = _new_regressor(config)
+        try:
+            model.fit(x_train, y_train.to_numpy(dtype=float))
+        except Exception as exc:
+            if _is_cpu_large_dataset_error(exc):
+                raise RuntimeError(_local_tabpfn_fit_error_message()) from exc
+            if _is_oom_error(exc):
+                raise RuntimeError(
+                    "Local TabPFN ran out of memory while fitting. Reduce `max_train_rows`, set "
+                    "`device` to `cpu`, lower `n_estimators`, or shorten `train_window_days` in "
+                    "the local TabPFN config."
+                ) from exc
+            raise
+        y_true = prices["price_da"] if "price_da" in prices.columns else None
+        forecast_df = _prediction_frame(model, x_future, future_index, y_true, config)
+        all_forecasts.append(forecast_df)
+
+        runtime_seconds = time.perf_counter() - start_time
+        runtime_records.append(
+            {
+                "forecast_day": forecast_day,
+                "runtime_seconds": runtime_seconds,
+                "train_rows": len(x_train),
+                "n_features": len(x_train.columns),
+                "forecast_horizon": config.forecast_horizon,
+                "n_estimators": config.n_estimators,
+                "device": config.device,
+                "predict_batch_size": config.predict_batch_size,
+                "use_exaa": config.use_exaa,
+                "use_load_forecast": config.use_load_forecast,
+            }
+        )
+        print(f"  {forecast_day.date()}  TabPFN-local  {runtime_seconds:.1f}s")
+
+    forecast_all = pd.concat(all_forecasts).sort_index() if all_forecasts else pd.DataFrame()
+    runtime_df = pd.DataFrame(runtime_records)
+    metrics_df = _compute_metrics(forecast_all, config.quantile_columns)
+
+    if save_outputs:
+        save_tabpfn_local_outputs(
+            export_dir=config.resolved_export_dir,
+            forecast_df=forecast_all,
+            runtime_df=runtime_df,
+            config=config,
+            metrics_df=metrics_df,
+            feature_columns=list(feature_frame.columns),
+        )
+
+    return {
+        "forecast": forecast_all,
+        "runtime": runtime_df,
+        "metrics": metrics_df,
+        "feature_columns": list(feature_frame.columns),
+    }
+
+
+def save_tabpfn_local_outputs(
+    export_dir: Path,
+    forecast_df: pd.DataFrame,
+    runtime_df: pd.DataFrame,
+    config: TabpfnLocalConfig,
+    metrics_df: pd.DataFrame | None = None,
+    feature_columns: list[str] | None = None,
+) -> None:
+    """Save local TabPFN outputs with the shared forecast artifact layout."""
+    export_dir.mkdir(parents=True, exist_ok=True)
+    forecast_df.to_csv(export_dir / "forecast.csv", index=True)
+    runtime_df.to_csv(export_dir / "runtime.csv", index=False)
+    if metrics_df is not None and not metrics_df.empty:
+        metrics_df.to_csv(export_dir / "metrics.csv", index=False)
+
+    payload = config.model_dump(mode="json")
+    payload["experiment_name"] = config.resolved_experiment_name
+    payload["feature_columns"] = feature_columns or []
+    payload.setdefault("created_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    with open(export_dir / "config.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+    print(f"✓ Saved local TabPFN -> {export_dir}")

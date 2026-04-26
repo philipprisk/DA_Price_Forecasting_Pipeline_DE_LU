@@ -10,21 +10,24 @@ two electricity-price forecasting models:
 * **EXAA-Enriched Model** -- same feature set augmented by the day-ahead
   EXAA auction price.
 
-Each model produces one PDF figure saved to the ``output/`` directory
+Each model produces one PDF figure saved to the ``output/figures/`` directory
 in the repository root.
 
 Expected repository layout
 --------------------------
 repo/
-├── output/              (created automatically if missing)
+├── output/figures/      (created automatically if missing)
 └── visualization/
     └── plot_anc_bar.py
 """
 
+from pathlib import Path
+import argparse
+
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from pathlib import Path
 
 # ============================================================
 #  ANC VALUES
@@ -129,14 +132,58 @@ def draw_anc_bars(ax, features, anc_values, xmax):
     ax.invert_yaxis()
 
 
+def load_anc_bars(path: Path, top_n: int | None = None) -> tuple[list[str], np.ndarray]:
+    df = pd.read_csv(path)
+    feature_col = "feature_group" if "feature_group" in df.columns else "feature"
+    if feature_col not in df.columns or "ANC" not in df.columns:
+        raise ValueError(f"{path} must contain ANC and either feature_group or feature columns.")
+    work = df[[feature_col, "ANC"]].dropna().copy()
+    work = work.groupby(feature_col, as_index=False)["ANC"].mean().sort_values("ANC", ascending=False)
+    if top_n is not None:
+        work = work.head(top_n)
+    return work[feature_col].astype(str).tolist(), work["ANC"].to_numpy(dtype=float)
+
+
+def save_anc_bar(features, values, output_path: Path, figsize=(5.0, 5.0)) -> None:
+    xmax = float(np.nanmax(values) * 1.18) if len(values) else 1.0
+    fig, ax = plt.subplots(figsize=figsize)
+    draw_anc_bars(ax, features, values, xmax)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {output_path}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Plot ANC bar charts.")
+    parser.add_argument("--fundamental-csv", type=Path, default=None, help="ANC CSV for fundamental features.")
+    parser.add_argument("--exaa-csv", type=Path, default=None, help="ANC CSV for EXAA-enriched features.")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory.")
+    parser.add_argument("--top-n", type=int, default=None, help="Keep only the top N features from CSV inputs.")
+    return parser
+
+
 # ============================================================
 #  RUN
 # ============================================================
 
 if __name__ == "__main__":
+    args = build_parser().parse_args()
     _HERE = Path(__file__).parent.parent  # points to repository root
-    _OUT  = _HERE / "output"
+    _OUT  = args.output_dir or (_HERE / "output" / "figures")
     _OUT.mkdir(parents=True, exist_ok=True)
+
+    if args.fundamental_csv is not None:
+        features, values = load_anc_bars(args.fundamental_csv, top_n=args.top_n)
+        save_anc_bar(features, values, _OUT / "anc_fundamental.pdf")
+
+    if args.exaa_csv is not None:
+        features, values = load_anc_bars(args.exaa_csv, top_n=args.top_n)
+        save_anc_bar(features, values, _OUT / "anc_exaa.pdf")
+
+    if args.fundamental_csv is not None or args.exaa_csv is not None:
+        raise SystemExit(0)
 
     # ── Figure 1: Fundamental Model ──────────────────────────────
     xmax_fund = anc_fundamental.max() * 1.18

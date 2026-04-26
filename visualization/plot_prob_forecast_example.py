@@ -11,17 +11,19 @@ Expected repository layout
 --------------------------
 repo/
 ├── results/sqra_results/    (input CSVs)
-├── output/                  (created automatically if missing)
+├── output/figures/          (created automatically if missing)
 └── visualization/
     └── plot_prob_forecast_example.py
 """
+
+from pathlib import Path
+from typing import Optional
+import argparse
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from pathlib import Path
-from typing import Optional
 
 # ============================================================
 #  CONFIGURATION
@@ -33,7 +35,7 @@ _HERE = Path(__file__).parent.parent  # points to repository root
 FORECAST_PATH = _HERE / "results" / "sqra_results" / "era5_fundamental" / "forecast.csv"
 
 # Export path for the saved plot (None = display only, do not save)
-EXPORT_PATH = _HERE / "output" / "plot_prob_forecast_example.pdf"
+EXPORT_PATH = _HERE / "output" / "figures" / "plot_prob_forecast_example.pdf"
 
 # Time window for the plot (None = entire dataset)
 START_DATE = "2026-02-02"
@@ -83,6 +85,17 @@ def load_forecast_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def infer_quantile_columns(df: pd.DataFrame) -> list[str]:
+    candidates = ["q_0.1", "q_0.25", "q_0.5", "q_0.75", "q_0.9"]
+    available = [col for col in candidates if col in df.columns]
+    if len(available) >= 3:
+        return available
+    raise ValueError(
+        "Could not infer quantile columns. Expected columns like q0.100/q0.500/q0.900 "
+        "or q_0.1/q_0.5/q_0.9."
+    )
+
+
 # ============================================================
 #  PLOTTING FUNCTION
 # ============================================================
@@ -95,6 +108,7 @@ def plot_prob_forecast_paper(
     y_true_col:    Optional[str] = "y_true",
     save_path:     Optional[Path] = None,
     dpi:           int = 300,
+    show:          bool = True,
 ):
     """
     Render a publication-ready probabilistic forecast plot.
@@ -251,24 +265,42 @@ def plot_prob_forecast_paper(
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         print(f"Saved: {save_path}")
 
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ============================================================
 #  RUN
 # ============================================================
 
-if __name__ == "__main__":
-    QUANTILE_COLS = ["q_0.1", "q_0.25", "q_0.5", "q_0.75", "q_0.9"]
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Plot a probabilistic forecast from a modular forecast.csv artifact.")
+    parser.add_argument("--forecast", type=Path, default=FORECAST_PATH, help="Path to forecast.csv.")
+    parser.add_argument("--output", type=Path, default=EXPORT_PATH, help="Output PDF path. Use 'none' to display only.")
+    parser.add_argument("--start", default=START_DATE, help="Plot window start timestamp.")
+    parser.add_argument("--end", default=END_DATE, help="Plot window end timestamp.")
+    parser.add_argument("--y-true-col", default=Y_TRUE_COL, help="Realized price column name, or 'none'.")
+    parser.add_argument("--no-show", action="store_true", help="Save the figure without opening an interactive window.")
+    return parser
 
-    df = load_forecast_csv(FORECAST_PATH)
+
+if __name__ == "__main__":
+    args = build_parser().parse_args()
+    save_path = None if str(args.output).lower() == "none" else args.output
+    y_true_col = None if str(args.y_true_col).lower() == "none" else args.y_true_col
+
+    df = load_forecast_csv(args.forecast)
+    quantile_cols = infer_quantile_columns(df)
 
     plot_prob_forecast_paper(
         df_forecast   = df,
-        quantile_cols = QUANTILE_COLS,
-        start_date    = START_DATE,
-        end_date      = END_DATE,
-        y_true_col    = Y_TRUE_COL,
-        save_path     = EXPORT_PATH,
+        quantile_cols = quantile_cols,
+        start_date    = args.start,
+        end_date      = args.end,
+        y_true_col    = y_true_col,
+        save_path     = save_path,
         dpi           = 300,
+        show          = not args.no_show,
     )

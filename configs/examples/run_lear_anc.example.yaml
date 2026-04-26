@@ -1,0 +1,25 @@
+kind: lear_anc
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+  entsoe_start_date: "2024-01-01T00:00:00+01:00"
+  entsoe_end_date: "2026-04-23T00:00:00+02:00"
+  era5_dirs:
+    - data/processed/era5_aggregated
+  icon_dir: data/processed/icon_aggregated
+  dwd_folder_offset_date: "2025-10-26"
+  start_folder_date: "2025-08-01"
+  required_run: "09"
+  skip_dates:
+    - "2025-10-26"
+    - "2025-10-27"
+    - "2025-10-28"
+  weather_source: ERA5
+  variant: exaa
+  lars_start_date: "2025-12-01T00:00:00+01:00"
+  test_start: "2025-12-01T00:00:00+01:00"
+  test_end: "2026-02-28T23:45:00+01:00"
+  train_days_rolling: 112
+  n_clusters: 5

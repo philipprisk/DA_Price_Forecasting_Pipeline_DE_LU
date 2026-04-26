@@ -1,0 +1,115 @@
+[workspace]
+name = "da-price-forecasting"
+version = "0.1.0"
+description = "Modular forecasting pipelines for German day-ahead electricity prices."
+authors = ["Davide Igelsperger"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[environments]
+default = ["package", "core"]
+core = ["package", "core"]
+lear = ["package", "lear"]
+sqra = ["package", "sqra"]
+tabpfn = ["package", "tabpfn"]
+dev = ["package", "core", "dev"]
+
+[feature.package.pypi-dependencies]
+da-price-forecasting = { path = ".", editable = true }
+pyyaml = ">=6.0,<7"
+
+[feature.core.dependencies]
+python = "3.11.*"
+pip = "*"
+numpy = ">=2.4,<2.5"
+proj = ">=9,<10"
+pyogrio = ">=0.12,<1"
+pyproj = ">=3.7,<4"
+
+[feature.core.pypi-dependencies]
+pydantic = ">=2.11,<3"
+python-dotenv = ">=1.0,<2"
+requests = ">=2.32,<3"
+matplotlib = "==3.10.8"
+pandas = "==3.0.2"
+geopandas = "==1.1.3"
+shapely = "==2.1.2"
+scikit-learn = "==1.8.0"
+scipy = "==1.17.1"
+xarray = "==2026.4.0"
+cdsapi = ">=0.7.7"
+cfgrib = ">=0.9"
+pyarrow = ">=19"
+
+[feature.lear.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.lear.pypi-dependencies]
+pydantic = ">=2.11,<3"
+python-dotenv = "==1.2.2"
+requests = ">=2.32,<3"
+entsoe-py = "==0.8.0"
+holidays = "==0.95"
+matplotlib = "==3.10.8"
+numpy = "==2.4.4"
+pandas = "==3.0.2"
+scikit-learn = "==1.8.0"
+scipy = "==1.17.1"
+statsmodels = "==0.14.6"
+
+[feature.sqra.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.sqra.pypi-dependencies]
+pydantic = ">=2.11,<3"
+python-dotenv = "==1.2.2"
+requests = ">=2.32,<3"
+remodels = "==1.0.1"
+matplotlib = ">=3.7,<3.8"
+numpy = ">=1.26,<2"
+pandas = "==1.5.3"
+scikit-learn = ">=1.4,<1.6"
+scipy = ">=1.11,<1.13"
+
+[feature.tabpfn.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.tabpfn.pypi-dependencies]
+pydantic = ">=2.11,<3"
+python-dotenv = ">=1.0,<2"
+requests = ">=2.32,<3"
+entsoe-py = "==0.8.0"
+numpy = ">=1.26,<2"
+pandas = ">=2.2,<3"
+scikit-learn = ">=1.4,<1.7"
+tabpfn = "==7.1.1"
+tabpfn-time-series = "==1.0.10"
+datasets = ">=2.15,<4"
+fev = "==0.7.0"
+fsspec = ">=2023.1.0,<=2026.2.0"
+huggingface-hub = ">=0.25,<2"
+aiohttp = "==3.13.5"
+multidict = "==6.7.1"
+
+[feature.dev.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.dev.pypi-dependencies]
+pytest = ">=8,<9"
+
+[tasks]
+era5-download = { cmd = "python scripts/run.py --config configs/era5_download.yaml", default-environment = "core" }
+era5-aggregate = { cmd = "python scripts/run.py --config configs/era5_aggregate.yaml", default-environment = "core" }
+icon-aggregate = { cmd = "python scripts/run.py --config configs/icon_aggregate.yaml", default-environment = "core" }
+visualization-report = { cmd = "python scripts/run.py --config configs/visualization_report.yaml", default-environment = "core" }
+lear-operational = { cmd = "python scripts/run.py --config configs/lear_point_predictions.yaml", default-environment = "lear" }
+lear-anc = { cmd = "python scripts/run.py --config configs/lear_anc.yaml", default-environment = "lear" }
+sqra = { cmd = "python scripts/run.py --config configs/sqra_quantile_predictions.yaml", default-environment = "sqra" }
+tabpfn-ts = { cmd = "python scripts/run.py --config configs/tabpfn_ts.yaml", default-environment = "tabpfn" }
+tabpfn-local = { cmd = "python scripts/run.py --config configs/tabpfn_local.yaml", default-environment = "tabpfn" }
+energy-arena-point = { cmd = "python scripts/run.py --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
+test = { cmd = "pytest", default-environment = "dev" }
