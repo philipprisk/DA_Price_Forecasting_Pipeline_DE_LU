@@ -261,7 +261,7 @@ def rolling_point_forecast(
 def compute_metrics(fc: pd.DataFrame, label: str) -> dict:
     """Compute point forecast error metrics for a given forecast slice."""
     n_inf_nan = int((~np.isfinite(fc["y_pred"])).sum())
-    valid = fc[np.isfinite(fc["y_pred"])]
+    valid = fc[np.isfinite(fc["y_pred"]) & np.isfinite(fc["y_true"])]
 
     mae = mean_absolute_error(valid["y_true"], valid["y_pred"]) if len(valid) > 0 else np.nan
     rmse = np.sqrt(((valid["y_true"] - valid["y_pred"]) ** 2).mean()) if len(valid) > 0 else np.nan
