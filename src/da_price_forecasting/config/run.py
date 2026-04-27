@@ -21,6 +21,7 @@ class RunKind(str, Enum):
     ICON_AGGREGATE = "icon_aggregate"
     ENERGY_ARENA_SUBMIT = "energy_arena_submit"
     VISUALIZATION_REPORT = "visualization_report"
+    EVALUATION = "evaluation"
 
 
 class RunConfig(RepoConfigModel):

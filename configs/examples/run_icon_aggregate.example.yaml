@@ -2,7 +2,7 @@ kind: icon_aggregate
 config:
   repo_root: "."
   lsdf_base: /Volumes/iip-projects/energy/climateData/icon_by_Max_Kleinebrahm
-  output_parent: data/processed/icon_aggregated
+  output_parent: data/processed/icon_aggregated_c5
   shapefile_path: data/shapefile/ne_10m_admin_0_countries.shp
   n_clusters: 5
   buffer_km: 50

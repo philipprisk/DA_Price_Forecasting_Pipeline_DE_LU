@@ -19,6 +19,7 @@ from .energy_arena import (
     TabpfnLocalEnergyArenaSource,
     TabpfnTsEnergyArenaSource,
 )
+from .evaluation import EvaluationConfig, EvaluationForecastConfig
 from .lear import LearAncConfig, LearOperationalConfig
 from .preprocessing import Era5AggregationConfig, Era5DownloadConfig, IconAggregationConfig
 from .run import RunConfig, RunKind
@@ -28,6 +29,7 @@ from .visualization import (
     VisualizationAncBarConfig,
     VisualizationAncHeatmapConfig,
     VisualizationArtifactTableConfig,
+    VisualizationEvaluationReportConfig,
     VisualizationProbForecastConfig,
     VisualizationReportConfig,
 )
@@ -39,6 +41,8 @@ __all__ = [
     "EnergyArenaSubmissionConfig",
     "Era5AggregationConfig",
     "Era5DownloadConfig",
+    "EvaluationConfig",
+    "EvaluationForecastConfig",
     "ForecastFileEnergyArenaSource",
     "ForecastVariant",
     "IconAggregationConfig",
@@ -57,6 +61,7 @@ __all__ = [
     "VisualizationAncBarConfig",
     "VisualizationAncHeatmapConfig",
     "VisualizationArtifactTableConfig",
+    "VisualizationEvaluationReportConfig",
     "VisualizationProbForecastConfig",
     "VisualizationReportConfig",
     "WeatherSource",

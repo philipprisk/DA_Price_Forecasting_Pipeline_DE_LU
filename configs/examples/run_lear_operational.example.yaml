@@ -10,7 +10,7 @@ config:
   entsoe_end_date: "2026-04-23T00:00:00+02:00"
   era5_dirs:
     - data/processed/era5_aggregated
-  icon_dir: data/processed/icon_aggregated
+  icon_dir: data/processed/icon_aggregated_c5
   dwd_folder_offset_date: "2025-10-26"
   start_folder_date: "2025-08-01"
   required_run: "09"

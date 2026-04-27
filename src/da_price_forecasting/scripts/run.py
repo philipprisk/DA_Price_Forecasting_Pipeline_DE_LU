@@ -9,6 +9,7 @@ from ..config import (
     EnergyArenaSubmissionConfig,
     Era5AggregationConfig,
     Era5DownloadConfig,
+    EvaluationConfig,
     IconAggregationConfig,
     LearAncConfig,
     LearOperationalConfig,
@@ -117,6 +118,13 @@ def run_from_config(run_config: RunConfig, submit_override: bool = False) -> Non
 
         config = _load_nested_config(run_config, VisualizationReportConfig)
         run_visualization_report(config)
+        return
+
+    if kind == RunKind.EVALUATION:
+        from ..evaluation import run_evaluation
+
+        config = _load_nested_config(run_config, EvaluationConfig)
+        run_evaluation(config)
         return
 
     raise ValueError(f"Unsupported run kind: {kind}")

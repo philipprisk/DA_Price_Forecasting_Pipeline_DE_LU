@@ -100,16 +100,18 @@ pip = "*"
 
 [feature.dev.pypi-dependencies]
 pytest = ">=8,<9"
+entsoe-py = "==0.8.0"
 
 [tasks]
-era5-download = { cmd = "python scripts/run.py --config configs/era5_download.yaml", default-environment = "core" }
-era5-aggregate = { cmd = "python scripts/run.py --config configs/era5_aggregate.yaml", default-environment = "core" }
-icon-aggregate = { cmd = "python scripts/run.py --config configs/icon_aggregate.yaml", default-environment = "core" }
-visualization-report = { cmd = "python scripts/run.py --config configs/visualization_report.yaml", default-environment = "core" }
-lear-operational = { cmd = "python scripts/run.py --config configs/lear_point_predictions.yaml", default-environment = "lear" }
-lear-anc = { cmd = "python scripts/run.py --config configs/lear_anc.yaml", default-environment = "lear" }
-sqra = { cmd = "python scripts/run.py --config configs/sqra_quantile_predictions.yaml", default-environment = "sqra" }
-tabpfn-ts = { cmd = "python scripts/run.py --config configs/tabpfn_ts.yaml", default-environment = "tabpfn" }
-tabpfn-local = { cmd = "python scripts/run.py --config configs/tabpfn_local.yaml", default-environment = "tabpfn" }
-energy-arena-point = { cmd = "python scripts/run.py --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
+era5-download = { cmd = "da-price-forecast --config configs/era5_download.yaml", default-environment = "core" }
+era5-aggregate = { cmd = "da-price-forecast --config configs/era5_aggregate.yaml", default-environment = "core" }
+icon-aggregate = { cmd = "da-price-forecast --config configs/icon_aggregate.yaml", default-environment = "core" }
+visualization-report = { cmd = "da-price-forecast --config configs/visualization_report.yaml", default-environment = "core" }
+evaluation = { cmd = "da-price-forecast --config configs/evaluation.yaml", default-environment = "core" }
+lear-operational = { cmd = "da-price-forecast --config configs/lear_point_predictions.yaml", default-environment = "lear" }
+lear-anc = { cmd = "da-price-forecast --config configs/lear_anc.yaml", default-environment = "lear" }
+sqra = { cmd = "da-price-forecast --config configs/sqra_quantile_predictions.yaml", default-environment = "sqra" }
+tabpfn-ts = { cmd = "da-price-forecast --config configs/tabpfn_ts.yaml", default-environment = "tabpfn" }
+tabpfn-local = { cmd = "da-price-forecast --config configs/tabpfn_local.yaml", default-environment = "tabpfn" }
+energy-arena-point = { cmd = "da-price-forecast --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
 test = { cmd = "pytest", default-environment = "dev" }

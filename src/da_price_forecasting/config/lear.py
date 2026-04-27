@@ -28,7 +28,7 @@ class LearOperationalConfig(RepoConfigModel):
             Path("data/processed/era5_aggregated"),
         ]
     )
-    icon_dir: Path = Path("data/processed/icon_aggregated")
+    icon_dir: Path = Path("data/processed/icon_aggregated_c5")
     dwd_folder_offset_date: date = date(2025, 10, 26)
     start_folder_date: date = date(2025, 8, 1)
     required_run: str = "09"
@@ -125,7 +125,7 @@ class LearAncConfig(RepoConfigModel):
             Path("data/processed/era5_aggregated"),
         ]
     )
-    icon_dir: Path = Path("data/processed/icon_aggregated")
+    icon_dir: Path = Path("data/processed/icon_aggregated_c5")
     dwd_folder_offset_date: date = date(2025, 10, 26)
     start_folder_date: date = date(2025, 8, 1)
     required_run: str = "09"

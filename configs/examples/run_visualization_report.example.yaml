@@ -40,3 +40,22 @@ config:
     shapefile: data/shapefile/ne_10m_admin_0_countries.shp
     output_dir: output/figures
     train_days: 112
+  evaluation_report:
+    enabled: false
+    evaluation_dir: results/evaluation/tabpfn_ts_march
+    output_dir: output/figures/evaluation
+    formats:
+      - png
+      - pdf
+    plots:
+      - point_forecast
+      - quantile_fan
+      - metric_summary
+      - coverage
+      - error_by_hour
+    models: []
+    start: "2026-03-03T00:00:00+01:00"
+    end: "2026-03-07T23:45:00+01:00"
+    y_true_col: y_true
+    dpi: 300
+    show: false

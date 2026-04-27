@@ -44,7 +44,7 @@ class Era5AggregationConfig(RepoConfigModel):
 
 class IconAggregationConfig(RepoConfigModel):
     lsdf_base: Path = Path("/Volumes/iip-projects/energy/climateData/icon_by_Max_Kleinebrahm")
-    output_parent: Path = Path("data/processed/icon_aggregated")
+    output_parent: Path = Path("data/processed/icon_aggregated_c5")
     shapefile_path: Path = Path("data/shapefile/ne_10m_admin_0_countries.shp")
     n_clusters: int = 5
     buffer_km: int = 50

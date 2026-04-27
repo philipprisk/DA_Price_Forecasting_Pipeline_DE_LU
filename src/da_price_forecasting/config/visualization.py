@@ -42,6 +42,36 @@ class VisualizationAncHeatmapConfig(BaseModel):
     train_days: int = 112
 
 
+class VisualizationEvaluationReportConfig(BaseModel):
+    enabled: bool = False
+    evaluation_dir: Path = Path("results/evaluation/tabpfn_ts_march")
+    output_dir: Path | None = None
+    formats: list[str] = Field(default_factory=lambda: ["png", "pdf"])
+    plots: list[str] = Field(
+        default_factory=lambda: [
+            "point_forecast",
+            "quantile_fan",
+            "metric_summary",
+            "coverage",
+            "error_by_hour",
+        ]
+    )
+    models: list[str] = Field(default_factory=list)
+    start: str | None = None
+    end: str | None = None
+    y_true_col: str = "y_true"
+    dpi: int = 300
+    show: bool = False
+
+    @model_validator(mode="after")
+    def _normalise_options(self) -> "VisualizationEvaluationReportConfig":
+        self.formats = [fmt.removeprefix(".").lower() for fmt in self.formats]
+        if not self.formats:
+            raise ValueError("Evaluation visualization requires at least one output format.")
+        self.plots = [plot.lower() for plot in self.plots]
+        return self
+
+
 class VisualizationReportConfig(RepoConfigModel):
     output_dir: Path = Path("output/figures")
     mae_table: VisualizationArtifactTableConfig | None = Field(default_factory=VisualizationArtifactTableConfig)
@@ -51,6 +81,9 @@ class VisualizationReportConfig(RepoConfigModel):
     )
     anc_bars: VisualizationAncBarConfig | None = Field(default_factory=VisualizationAncBarConfig)
     anc_heatmaps: VisualizationAncHeatmapConfig | None = Field(default_factory=VisualizationAncHeatmapConfig)
+    evaluation_report: VisualizationEvaluationReportConfig | None = Field(
+        default_factory=VisualizationEvaluationReportConfig
+    )
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> "VisualizationReportConfig":
@@ -94,5 +127,14 @@ class VisualizationReportConfig(RepoConfigModel):
             self.anc_heatmaps.shapefile = resolve_path(self.anc_heatmaps.shapefile, self.repo_root)
             if self.anc_heatmaps.output_dir is not None:
                 self.anc_heatmaps.output_dir = resolve_path(self.anc_heatmaps.output_dir, self.repo_root)
+
+        if self.evaluation_report is not None:
+            self.evaluation_report.evaluation_dir = resolve_path(
+                self.evaluation_report.evaluation_dir, self.repo_root
+            )
+            if self.evaluation_report.output_dir is not None:
+                self.evaluation_report.output_dir = resolve_path(
+                    self.evaluation_report.output_dir, self.repo_root
+                )
 
         return self

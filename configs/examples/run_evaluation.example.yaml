@@ -1,0 +1,128 @@
+kind: evaluation
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  test_start: "2025-12-01T00:00:00+01:00"
+  test_end: "2026-02-28T23:45:00+01:00"
+  skip_dates:
+    - "2026-01-22"
+  frequency: 15min
+  n_periods: 96
+  y_true_column: y_true
+  quantiles:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 0.9
+  prediction_intervals:
+    - [0.1, 0.9]
+    - [0.25, 0.75]
+  significance_level: 0.05
+  output_dir: results/evaluation/main
+  validate_inputs: true
+  run_gw_tests: true
+  point_forecasts:
+    - name: era5_d56_c1_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d56/c1/fundamental/forecast.csv
+    - name: era5_d56_c1_exaa
+      kind: point
+      path: results/lear_op_results/era5/d56/c1/exaa/forecast.csv
+    - name: era5_d56_c5_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d56/c5/fundamental/forecast.csv
+    - name: era5_d56_c5_exaa
+      kind: point
+      path: results/lear_op_results/era5/d56/c5/exaa/forecast.csv
+    - name: era5_d56_c25_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d56/c25/fundamental/forecast.csv
+    - name: era5_d56_c25_exaa
+      kind: point
+      path: results/lear_op_results/era5/d56/c25/exaa/forecast.csv
+    - name: era5_d112_c1_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d112/c1/fundamental/forecast.csv
+    - name: era5_d112_c1_exaa
+      kind: point
+      path: results/lear_op_results/era5/d112/c1/exaa/forecast.csv
+    - name: era5_d112_c5_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d112/c5/fundamental/forecast.csv
+    - name: era5_d112_c5_exaa
+      kind: point
+      path: results/lear_op_results/era5/d112/c5/exaa/forecast.csv
+    - name: era5_d112_c25_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d112/c25/fundamental/forecast.csv
+    - name: era5_d112_c25_exaa
+      kind: point
+      path: results/lear_op_results/era5/d112/c25/exaa/forecast.csv
+    - name: era5_d364_c1_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d364/c1/fundamental/forecast.csv
+    - name: era5_d364_c1_exaa
+      kind: point
+      path: results/lear_op_results/era5/d364/c1/exaa/forecast.csv
+    - name: era5_d364_c5_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d364/c5/fundamental/forecast.csv
+    - name: era5_d364_c5_exaa
+      kind: point
+      path: results/lear_op_results/era5/d364/c5/exaa/forecast.csv
+    - name: era5_d364_c25_fundamental
+      kind: point
+      path: results/lear_op_results/era5/d364/c25/fundamental/forecast.csv
+    - name: era5_d364_c25_exaa
+      kind: point
+      path: results/lear_op_results/era5/d364/c25/exaa/forecast.csv
+    - name: dwd_d56_c1_fundamental
+      kind: point
+      path: results/lear_op_results/dwd/d56/c1/fundamental/forecast.csv
+    - name: dwd_d56_c1_exaa
+      kind: point
+      path: results/lear_op_results/dwd/d56/c1/exaa/forecast.csv
+    - name: dwd_d56_c5_fundamental
+      kind: point
+      path: results/lear_op_results/dwd/d56/c5/fundamental/forecast.csv
+    - name: dwd_d56_c5_exaa
+      kind: point
+      path: results/lear_op_results/dwd/d56/c5/exaa/forecast.csv
+    - name: dwd_d56_c25_fundamental
+      kind: point
+      path: results/lear_op_results/dwd/d56/c25/fundamental/forecast.csv
+    - name: dwd_d56_c25_exaa
+      kind: point
+      path: results/lear_op_results/dwd/d56/c25/exaa/forecast.csv
+    - name: exaa_only_d56
+      kind: point
+      path: results/lear_op_results/exaa_only/d56/forecast.csv
+    - name: exaa_only_d112
+      kind: point
+      path: results/lear_op_results/exaa_only/d112/forecast.csv
+    - name: exaa_only_d364
+      kind: point
+      path: results/lear_op_results/exaa_only/d364/forecast.csv
+    - name: exaa_naive
+      kind: point
+      path: results/lear_op_results/exaa_naive/forecast.csv
+  quantile_forecasts:
+    - name: fund_ERA5
+      kind: quantile
+      path: results/sqra_results/era5_fundamental/forecast.csv
+    - name: fund_DWD
+      kind: quantile
+      path: results/sqra_results/dwd_fundamental/forecast.csv
+    - name: exaa_ERA5
+      kind: quantile
+      path: results/sqra_results/era5_exaa_enriched/forecast.csv
+    - name: exaa_DWD
+      kind: quantile
+      path: results/sqra_results/dwd_exaa_enriched/forecast.csv
+    - name: exaa_naive
+      kind: quantile
+      path: results/sqra_results/exaa_naive/forecast.csv
+    - name: exaa_only
+      kind: quantile
+      path: results/sqra_results/exaa_only/forecast.csv
