@@ -65,6 +65,102 @@ cp .env.example .env
 
 Local run configs live as `configs/*.yaml` or `configs/*.yml` and are ignored by Git. The tracked templates live under `configs/examples/`.
 
+## bwCloud VM Usage
+
+The pipeline can be run on a bwCloud/OpenStack VM with the same Pixi commands used locally. Use an Ubuntu image such as Ubuntu 24.04 and a flavor with enough memory for model runs. The `m1.xlarge` flavor is a practical starting point for heavier experiments, but the default root disk is small, so large `data/` and `results/` folders should live on an attached volume.
+
+Private SSH keys must not be stored in this repository or in `.env`. Keep them under `~/.ssh/` with restrictive permissions, and optionally store only non-secret paths or API keys in `.env`.
+
+From your local machine, move the bwCloud private key out of the repo:
+
+```bash
+mkdir -p ~/.ssh
+mv key.txt ~/.ssh/bwcloud_forecasting
+chmod 600 ~/.ssh/bwcloud_forecasting
+```
+
+Add a local SSH config entry:
+
+```sshconfig
+Host bwcloud-forecasting
+  HostName 193.196.37.255
+  User ubuntu
+  IdentityFile ~/.ssh/bwcloud_forecasting
+  ServerAliveInterval 60
+```
+
+Connect from your local machine:
+
+```bash
+ssh bwcloud-forecasting
+```
+
+On a fresh VM, install the base system tools and Pixi:
+
+```bash
+sudo apt update
+sudo apt install -y git curl build-essential tmux htop rsync
+curl -fsSL https://pixi.sh/install.sh | bash
+source ~/.bashrc
+```
+
+Set up GitHub access on the VM with a VM-specific SSH key:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/github_bwcloud -C "bwcloud-github"
+cat ~/.ssh/github_bwcloud.pub
+```
+
+Add the printed public key in GitHub under `Settings -> SSH and GPG keys`, then configure SSH on the VM:
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/github_bwcloud
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+ssh -T git@github.com
+```
+
+Clone and test the repository on the VM:
+
+```bash
+git clone git@github.com:philipprisk/DA_Price_Forecasting_Pipeline_DE_LU.git
+cd DA_Price_Forecasting_Pipeline_DE_LU
+git checkout refactor/modularize_pipeline
+pixi run test
+```
+
+For long-running jobs, use `tmux` so the run survives SSH disconnects:
+
+```bash
+tmux new -s forecasting
+pixi run -e lear da-price-forecast --config configs/lear_point_predictions.yaml
+```
+
+Detach with `Ctrl-b`, then `d`, and reattach later with:
+
+```bash
+tmux attach -t forecasting
+```
+
+Create a VM-local `.env` for API keys:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+For data/results transfer, use `rsync` from your local machine:
+
+```bash
+rsync -av --progress data/ bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/data/
+rsync -av --progress bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/results/ results/
+```
+
 ## Modular Workflow
 
 The main workflow is notebook-free:

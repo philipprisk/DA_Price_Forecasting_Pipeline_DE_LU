@@ -20,6 +20,10 @@ env*/
 .env
 .env.*
 !.env.example
+key.txt
+*.pem
+*.key
+.ssh/
 configs/*.json
 configs/*.yaml
 configs/*.yml
