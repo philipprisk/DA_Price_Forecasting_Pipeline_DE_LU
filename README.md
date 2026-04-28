@@ -69,7 +69,7 @@ Local run configs live as `configs/*.yaml` or `configs/*.yml` and are ignored by
 
 The pipeline can be run on a bwCloud/OpenStack VM with the same Pixi commands used locally. Use an Ubuntu image such as Ubuntu 24.04 and a flavor with enough memory for model runs. The `m1.xlarge` flavor is a practical starting point for heavier experiments, but the default root disk is small, so large `data/` and `results/` folders should live on an attached volume.
 
-Private SSH keys must not be stored in this repository or in `.env`. Keep them under `~/.ssh/` with restrictive permissions, and optionally store only non-secret paths or API keys in `.env`.
+Private SSH keys must not be stored in this repository or in `.env`. Keep them under `~/.ssh/` with restrictive permissions. API keys belong in the untracked `.env` file on the machine that runs the pipeline.
 
 From your local machine, move the bwCloud private key out of the repo:
 
@@ -152,6 +152,81 @@ Create a VM-local `.env` for API keys:
 ```bash
 cp .env.example .env
 nano .env
+```
+
+### Daily Energy Arena automation
+
+The daily automation runner uses the local, untracked submission configs:
+
+- `configs/energy_arena_point_submission.yaml`
+- `configs/energy_arena_sqra_quantile_submission.yaml`
+
+After changing these configs locally, copy them to the VM:
+
+```bash
+rsync -av configs/energy_arena_point_submission.yaml configs/energy_arena_sqra_quantile_submission.yaml \
+  bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/configs/
+```
+
+For each run it targets tomorrow in `Europe/Berlin`, generates the EXAA-only LEAR point forecasts needed by SQRA, writes date-specific generated configs under `results/energy_arena_work/exaa_only/<forecast-date>/`, submits the point forecast, then submits the SQRA quantile forecast from the `sqra` Pixi environment. Fixed dates in the two local template configs are overwritten by the runner for the target day.
+
+Run a dry run first. This still builds forecasts and payloads, but does not submit to Energy Arena:
+
+```bash
+pixi run energy-arena-daily --dry-run
+```
+
+To test a specific target day:
+
+```bash
+pixi run energy-arena-daily --dry-run --forecast-date 2026-04-29
+```
+
+To submit manually:
+
+```bash
+pixi run energy-arena-daily
+```
+
+On the VM, set the system timezone and create a user-level systemd timer:
+
+```bash
+sudo timedatectl set-timezone Europe/Berlin
+loginctl enable-linger ubuntu
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/energy-arena-daily.service <<'EOF'
+[Unit]
+Description=Daily Energy Arena EXAA-only point and SQRA submission
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
+ExecStart=%h/.pixi/bin/pixi run energy-arena-daily
+EOF
+
+cat > ~/.config/systemd/user/energy-arena-daily.timer <<'EOF'
+[Unit]
+Description=Run Energy Arena submission daily at 11:30 Europe/Berlin
+
+[Timer]
+OnCalendar=*-*-* 11:30:00
+Persistent=true
+Unit=energy-arena-daily.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now energy-arena-daily.timer
+systemctl --user list-timers energy-arena-daily.timer
+```
+
+Inspect logs with:
+
+```bash
+journalctl --user -u energy-arena-daily.service -f
 ```
 
 For data/results transfer, use `rsync` from your local machine:

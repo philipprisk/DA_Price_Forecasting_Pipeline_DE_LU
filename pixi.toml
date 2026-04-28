@@ -114,4 +114,5 @@ sqra = { cmd = "da-price-forecast --config configs/sqra_quantile_predictions.yam
 tabpfn-ts = { cmd = "da-price-forecast --config configs/tabpfn_ts.yaml", default-environment = "tabpfn" }
 tabpfn-local = { cmd = "da-price-forecast --config configs/tabpfn_local.yaml", default-environment = "tabpfn" }
 energy-arena-point = { cmd = "da-price-forecast --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
+energy-arena-daily = { cmd = "da-price-energy-arena-daily", default-environment = "lear" }
 test = { cmd = "pytest", default-environment = "dev" }
