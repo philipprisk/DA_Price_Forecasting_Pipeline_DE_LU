@@ -170,6 +170,8 @@ rsync -av configs/energy_arena_point_submission.yaml configs/energy_arena_sqra_q
 
 For each run it targets tomorrow in `Europe/Berlin`, generates the EXAA-only LEAR point forecasts needed by SQRA, writes date-specific generated configs under `results/energy_arena_work/exaa_only/<forecast-date>/`, submits the point forecast, then submits the SQRA quantile forecast from the `sqra` Pixi environment. Fixed dates in the two local template configs are overwritten by the runner for the target day.
 
+Because the upstream EXAA prices can appear after the scheduled start time, the VM service should use a retry window. The example below starts at 11:30 and retries every 5 minutes until 11:55, stopping as soon as one full point + quantile submission succeeds. The final retry is intentionally before 12:00 so the forecast can still be submitted before the Energy Arena deadline.
+
 Run a dry run first. This still builds forecasts and payloads, but does not submit to Energy Arena:
 
 ```bash
@@ -188,6 +190,12 @@ To submit manually:
 pixi run energy-arena-daily
 ```
 
+To submit manually with the same retry behavior as the VM timer:
+
+```bash
+pixi run energy-arena-daily --retry-until 11:55 --retry-interval-minutes 5
+```
+
 On the VM, set the system timezone and create a user-level systemd timer:
 
 ```bash
@@ -202,7 +210,7 @@ Description=Daily Energy Arena EXAA-only point and SQRA submission
 [Service]
 Type=oneshot
 WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
-ExecStart=%h/.pixi/bin/pixi run energy-arena-daily
+ExecStart=%h/.pixi/bin/pixi run energy-arena-daily --retry-until 11:55 --retry-interval-minutes 5
 EOF
 
 cat > ~/.config/systemd/user/energy-arena-daily.timer <<'EOF'

@@ -4,8 +4,9 @@ import argparse
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -216,6 +217,43 @@ def sqra_train_days(quantile_payload: dict[str, Any], repo_root: Path) -> int:
     return int(sqra_config.get("train_days_rolling", SqraConfig().train_days_rolling))
 
 
+def _format_day_index(index: pd.Index) -> str:
+    if index.empty:
+        return "none"
+    return f"{index.min().date()}..{index.max().date()} ({len(index)} days)"
+
+
+def _validate_point_base_dataset(
+    X: pd.DataFrame,
+    forecast_days: pd.DatetimeIndex,
+    forecast_day: pd.Timestamp,
+) -> None:
+    if X.empty:
+        raise RuntimeError(
+            "No complete LEAR feature rows are available after filtering. "
+            "For the EXAA-only daily run this usually means the ENTSO-E EXAA "
+            "day-ahead price series is not available yet."
+        )
+
+    available_days = pd.DatetimeIndex(X.index).normalize().unique().sort_values()
+    requested_days = pd.DatetimeIndex(forecast_days).normalize().unique().sort_values()
+    missing_days = requested_days.difference(available_days)
+
+    if forecast_day not in available_days:
+        raise RuntimeError(
+            "No complete EXAA-only feature row is available for target day "
+            f"{forecast_day.date()}. Available feature days: {_format_day_index(available_days)}. "
+            "Retry after the EXAA prices have been published by the upstream API."
+        )
+
+    if len(missing_days) == len(requested_days):
+        raise RuntimeError(
+            "None of the requested SQRA point-base forecast days has complete "
+            f"LEAR features. Requested: {_format_day_index(requested_days)}; "
+            f"available: {_format_day_index(available_days)}."
+        )
+
+
 def run_point_base_forecasts(
     lear_config: LearOperationalConfig,
     forecast_date: date,
@@ -234,6 +272,11 @@ def run_point_base_forecasts(
     )
 
     dataset = prepare_lear_operational_prediction_dataset(config=lear_config, forecast_date=forecast_day)
+    _validate_point_base_dataset(
+        X=dataset["X"],
+        forecast_days=forecast_days,
+        forecast_day=forecast_day,
+    )
     forecast_df, runtime_df, _, _, _ = rolling_point_forecast(
         X=dataset["X"],
         Y=dataset["Y"],
@@ -363,6 +406,67 @@ def run_daily_energy_arena(
     return paths
 
 
+def _parse_retry_until(value: str | None) -> datetime_time | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.strptime(value, "%H:%M").time()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--retry-until must use HH:MM, for example 12:30.") from exc
+    return parsed
+
+
+def _retry_deadline(now: datetime, retry_until: datetime_time | None, target_tz: str) -> datetime | None:
+    if retry_until is None:
+        return None
+    tz = ZoneInfo(target_tz)
+    current = now.astimezone(tz) if now.tzinfo is not None else now.replace(tzinfo=tz)
+    return datetime.combine(current.date(), retry_until, tzinfo=tz)
+
+
+def run_daily_energy_arena_with_retries(
+    *,
+    point_config_path: Path,
+    quantile_config_path: Path,
+    forecast_date: date | None,
+    target_tz: str,
+    work_root: Path | None,
+    submit: bool,
+    run_quantile: bool,
+    retry_until: datetime_time | None,
+    retry_interval_minutes: float,
+) -> DailyPaths:
+    deadline = _retry_deadline(datetime.now(ZoneInfo(target_tz)), retry_until, target_tz)
+    interval_seconds = max(retry_interval_minutes, 0.1) * 60
+    attempt = 1
+
+    while True:
+        try:
+            return run_daily_energy_arena(
+                point_config_path=point_config_path,
+                quantile_config_path=quantile_config_path,
+                forecast_date=forecast_date,
+                target_tz=target_tz,
+                work_root=work_root,
+                submit=submit,
+                run_quantile=run_quantile,
+            )
+        except Exception as exc:
+            now = datetime.now(ZoneInfo(target_tz))
+            if deadline is None or now + timedelta(seconds=interval_seconds) > deadline:
+                print(f"Daily Energy Arena attempt {attempt} failed and no retries remain: {exc}", flush=True)
+                raise
+
+            next_attempt = now + timedelta(seconds=interval_seconds)
+            print(
+                f"Daily Energy Arena attempt {attempt} failed: {exc}\n"
+                f"Retrying at {next_attempt.isoformat()} until {deadline.isoformat()}.",
+                flush=True,
+            )
+            attempt += 1
+            time.sleep(interval_seconds)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the daily Energy Arena EXAA-only point + SQRA submission workflow.")
     parser.add_argument("--point-config", type=Path, default=DEFAULT_POINT_CONFIG)
@@ -372,12 +476,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-root", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Generate payloads but do not submit to Energy Arena.")
     parser.add_argument("--skip-quantile", action="store_true", help="Run only the point base and point submission.")
+    parser.add_argument("--retry-until", type=_parse_retry_until, default=None, help="Retry failed attempts until HH:MM in target timezone.")
+    parser.add_argument("--retry-interval-minutes", type=float, default=10.0)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    run_daily_energy_arena(
+    run_daily_energy_arena_with_retries(
         point_config_path=args.point_config,
         quantile_config_path=args.quantile_config,
         forecast_date=args.forecast_date,
@@ -385,6 +491,8 @@ def main(argv: list[str] | None = None) -> None:
         work_root=args.work_root,
         submit=not args.dry_run,
         run_quantile=not args.skip_quantile,
+        retry_until=args.retry_until,
+        retry_interval_minutes=args.retry_interval_minutes,
     )
 
 
