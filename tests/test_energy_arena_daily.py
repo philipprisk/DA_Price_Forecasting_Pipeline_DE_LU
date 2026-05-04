@@ -14,6 +14,7 @@ from da_price_forecasting.scripts.energy_arena_daily import (
     _validate_point_base_dataset,
     build_point_submission_payload,
     build_quantile_submission_payload,
+    daily_forecast_days,
     dated_work_paths,
     day_bounds,
     prepare_lear_config_for_point_base,
@@ -154,6 +155,16 @@ def test_prepare_lear_config_for_point_base_uses_dated_work_dir(tmp_path: Path) 
 
 def test_sqra_train_days_are_read_from_quantile_config() -> None:
     assert sqra_train_days(_quantile_payload(), Path.cwd()) == 60
+
+
+def test_daily_forecast_days_stay_at_local_midnight_across_dst() -> None:
+    days = daily_forecast_days(date(2026, 5, 5), history_days=60, target_tz="Europe/Berlin")
+
+    assert days[0] == pd.Timestamp("2026-03-06T00:00:00+01:00")
+    assert days[-1] == pd.Timestamp("2026-05-05T00:00:00+02:00")
+    assert len(days) == 61
+    assert set(days.hour) == {0}
+    assert set(days.minute) == {0}
 
 
 def test_retry_deadline_uses_same_target_timezone_day() -> None:

@@ -217,6 +217,15 @@ def sqra_train_days(quantile_payload: dict[str, Any], repo_root: Path) -> int:
     return int(sqra_config.get("train_days_rolling", SqraConfig().train_days_rolling))
 
 
+def daily_forecast_days(forecast_date: date, history_days: int, target_tz: str) -> pd.DatetimeIndex:
+    start_date = forecast_date - timedelta(days=history_days)
+    return pd.date_range(
+        start=pd.Timestamp(start_date, tz=target_tz),
+        end=pd.Timestamp(forecast_date, tz=target_tz),
+        freq="D",
+    )
+
+
 def _format_day_index(index: pd.Index) -> str:
     if index.empty:
         return "none"
@@ -282,12 +291,7 @@ def run_point_base_forecasts(
     from ..pipelines.lear import prepare_lear_operational_prediction_dataset
 
     forecast_day = pd.Timestamp(forecast_date, tz=lear_config.target_tz).normalize()
-    forecast_days = pd.date_range(
-        start=forecast_day - pd.Timedelta(days=history_days),
-        end=forecast_day,
-        freq="D",
-        tz=lear_config.target_tz,
-    )
+    forecast_days = daily_forecast_days(forecast_date, history_days, lear_config.target_tz)
 
     dataset = prepare_lear_operational_prediction_dataset(config=lear_config, forecast_date=forecast_day)
     _validate_point_base_dataset(
