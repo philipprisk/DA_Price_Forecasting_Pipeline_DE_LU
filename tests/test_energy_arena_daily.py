@@ -172,4 +172,17 @@ def test_missing_target_feature_day_raises_actionable_error() -> None:
     forecast_days = pd.date_range("2026-04-28", "2026-04-29", freq="D", tz="Europe/Berlin")
 
     with pytest.raises(RuntimeError, match="No complete EXAA-only feature row"):
-        _validate_point_base_dataset(X=X, forecast_days=forecast_days, forecast_day=forecast_day)
+        _validate_point_base_dataset(X=X, forecast_days=forecast_days, forecast_day=forecast_day, train_days=56)
+
+
+def test_target_feature_day_without_training_rows_raises_actionable_error() -> None:
+    forecast_day = pd.Timestamp("2026-04-29", tz="Europe/Berlin")
+    X = pd.DataFrame({"exaa_d0_mtu_00": [42.0]}, index=pd.DatetimeIndex([forecast_day]))
+
+    with pytest.raises(RuntimeError, match="not enough historical EXAA feature days"):
+        _validate_point_base_dataset(
+            X=X,
+            forecast_days=pd.DatetimeIndex([forecast_day]),
+            forecast_day=forecast_day,
+            train_days=56,
+        )

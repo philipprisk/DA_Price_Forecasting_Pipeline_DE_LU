@@ -227,6 +227,7 @@ def _validate_point_base_dataset(
     X: pd.DataFrame,
     forecast_days: pd.DatetimeIndex,
     forecast_day: pd.Timestamp,
+    train_days: int,
 ) -> None:
     if X.empty:
         raise RuntimeError(
@@ -253,6 +254,23 @@ def _validate_point_base_dataset(
             f"available: {_format_day_index(available_days)}."
         )
 
+    runnable_days = []
+    for day in requested_days:
+        train_start = day - pd.Timedelta(days=train_days)
+        train_end = day - pd.Timedelta(days=1)
+        has_test_row = day in available_days
+        has_train_rows = bool(((X.index >= train_start) & (X.index <= train_end)).sum())
+        if has_test_row and has_train_rows:
+            runnable_days.append(day)
+
+    if not runnable_days:
+        raise RuntimeError(
+            "No requested point-base forecast day has both a test feature row "
+            f"and at least one prior training feature row. Requested: {_format_day_index(requested_days)}; "
+            f"available: {_format_day_index(available_days)}. This often means the EXAA API response "
+            "contains the target day but not enough historical EXAA feature days."
+        )
+
 
 def run_point_base_forecasts(
     lear_config: LearOperationalConfig,
@@ -276,6 +294,7 @@ def run_point_base_forecasts(
         X=dataset["X"],
         forecast_days=forecast_days,
         forecast_day=forecast_day,
+        train_days=lear_config.train_days_rolling,
     )
     forecast_df, runtime_df, _, _, _ = rolling_point_forecast(
         X=dataset["X"],

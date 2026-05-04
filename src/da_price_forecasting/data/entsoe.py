@@ -39,6 +39,16 @@ def _restrict_calendar_window(df: pd.DataFrame, start_day: pd.Timestamp, end_day
     return df.loc[start_cut:end_cut]
 
 
+def _combine_parsed_price_series(parsed) -> pd.Series | None:
+    if not isinstance(parsed, dict):
+        return parsed
+
+    series_parts = [series for series in parsed.values() if series is not None and len(series) > 0]
+    if not series_parts:
+        return None
+    return pd.concat(series_parts).sort_index()
+
+
 def fetch_prices(
     start_day: pd.Timestamp,
     end_day: pd.Timestamp,
@@ -89,10 +99,7 @@ def fetch_prices_exaa(
         )
         parsed = parse_prices(xml)
 
-        if isinstance(parsed, dict):
-            chunk_series = next(iter(parsed.values())) if len(parsed) == 1 else max(parsed.values(), key=len)
-        else:
-            chunk_series = parsed
+        chunk_series = _combine_parsed_price_series(parsed)
 
         if chunk_series is None or len(chunk_series) == 0:
             current_start = current_end + pd.Timedelta(days=1)
@@ -139,4 +146,3 @@ def fetch_load_forecast(
     series.name = "load_fc"
     df_load_forecast_15 = _expand_hourly_series_to_quarter_hour(series, target_tz=target_tz, value_name="load_fc")
     return _restrict_calendar_window(df_load_forecast_15, start_day, end_day, target_tz)
-

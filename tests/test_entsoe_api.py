@@ -124,3 +124,34 @@ def test_fetch_exaa_prices_parses_raw_api_xml(monkeypatch) -> None:
     assert result.columns.tolist() == ["price_exaa"]
     assert result["price_exaa"].iloc[0] == 0.0
     assert result["price_exaa"].iloc[-1] == 23.0
+
+
+def test_fetch_exaa_prices_combines_multiple_parsed_series(monkeypatch) -> None:
+    class FakePandasClient:
+        pass
+
+    class FakeRawClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def query_day_ahead_prices(self, country_code, start, end, sequence):
+            return "<publication-market-document/>"
+
+    def fake_parse_prices(xml):
+        return {
+            "day_1": _hourly_series(pd.Timestamp("2026-03-01T00:00:00+01:00"), "price_exaa"),
+            "day_2": _hourly_series(pd.Timestamp("2026-03-02T00:00:00+01:00"), "price_exaa") + 100,
+        }
+
+    monkeypatch.setenv("ENTSOE_TEST_API_KEY", "secret")
+    entsoe = _load_entsoe_module(monkeypatch, FakePandasClient, FakeRawClient, fake_parse_prices)
+
+    result = entsoe.fetch_prices_exaa(
+        start_day=pd.Timestamp("2026-03-01", tz="Europe/Berlin"),
+        end_day=pd.Timestamp("2026-03-02", tz="Europe/Berlin"),
+        api_key_env="ENTSOE_TEST_API_KEY",
+    )
+
+    assert len(result) == 192
+    assert result.loc[pd.Timestamp("2026-03-01T00:00:00+01:00"), "price_exaa"] == 0.0
+    assert result.loc[pd.Timestamp("2026-03-02T00:00:00+01:00"), "price_exaa"] == 100.0
