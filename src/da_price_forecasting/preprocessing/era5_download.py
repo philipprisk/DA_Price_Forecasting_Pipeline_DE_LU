@@ -243,7 +243,7 @@ def run_download(config: Era5DownloadConfig) -> None:
         force=config.force,
         append_missing=config.append_missing,
         solar_mode=False,
-        variables=MAIN_VARIABLES,
+        variables=config.main_variables,
         area=config.area,
     )
     retrieve_era5(
@@ -253,7 +253,7 @@ def run_download(config: Era5DownloadConfig) -> None:
         force=config.force,
         append_missing=config.append_missing,
         solar_mode=True,
-        variables=SOLAR_VARIABLES,
+        variables=config.solar_variables,
         area=config.area,
     )
     print("\nERA5 raw downloads finished.")

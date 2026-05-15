@@ -26,3 +26,24 @@ config:
   test_end: "2026-04-23T23:45:00+02:00"
   train_days_rolling: 56
   n_clusters: 5
+  features:
+    covariates:
+      # LEAR already uses EXAA/load through `variant`; add timestamp covariates here.
+      # - commodities
+    commodities:
+      provider: investiny
+      lag_days: 2
+      lookback_days: 14
+      instruments:
+        - name: gas_ttf
+          investing_id: 1178699
+          price_field: close
+        - name: brent_oil
+          investing_id: 8833
+          price_field: close
+        - name: co2_eua
+          investing_id: 8848
+          price_field: close
+        - name: coal_rotterdam
+          investing_id: 1112838
+          price_field: close

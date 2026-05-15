@@ -283,6 +283,8 @@ def evaluate_probabilistic_forecasts(
     for day in date_range:
         day_end = day + pd.Timedelta(days=1)
         df_day = df.loc[(df.index >= day) & (df.index < day_end)]
+        required_columns = [y_true_col] + [f"q{q:.3f}" for q in quantiles]
+        df_day = df_day.dropna(subset=required_columns)
         if df_day.empty:
             continue
 
@@ -298,10 +300,13 @@ def evaluate_probabilistic_forecasts(
                 f"Coverage {q_inner_low}-{q_inner_high}": cov_inner,
                 f"Coverage {q_outer_low}-{q_outer_high}": cov_outer,
                 "APS": aps,
+                "n_obs": len(df_day),
             }
         )
 
     df_res = pd.DataFrame(results)
+    if df_res.empty:
+        return df_res
     summary = df_res.mean(numeric_only=True)
     summary["Target Day"] = "Mean over all days"
     return pd.concat([df_res, pd.DataFrame([summary])], ignore_index=True)

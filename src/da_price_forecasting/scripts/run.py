@@ -7,12 +7,23 @@ from typing import Any
 
 from ..config import (
     EnergyArenaSubmissionConfig,
+    EntsoeLoadForecastBenchmarkConfig,
+    EntsoeRenewableForecastBenchmarkConfig,
     Era5AggregationConfig,
     Era5DownloadConfig,
     EvaluationConfig,
+    ExaaNaiveConfig,
+    ForecastEnsembleConfig,
     IconAggregationConfig,
     LearAncConfig,
     LearOperationalConfig,
+    LoadForecastModelConfig,
+    MastrCapacityConfig,
+    PopulationClusterWeightsConfig,
+    RegionalRenewableFeatureConfig,
+    RenewableGenerationModelConfig,
+    RenewableGenerationPostprocessConfig,
+    RenewableProxyConfig,
     RunConfig,
     RunKind,
     SqraConfig,
@@ -47,6 +58,34 @@ def run_from_config(run_config: RunConfig, submit_override: bool = False) -> Non
             "Python 3.14 currently forces source builds for this stack."
         )
 
+    if kind == RunKind.ENTSOE_LOAD_FORECAST_BENCHMARK:
+        from ..pipelines.load_forecast import run_entsoe_load_forecast_benchmark
+
+        config = _load_nested_config(run_config, EntsoeLoadForecastBenchmarkConfig)
+        run_entsoe_load_forecast_benchmark(config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.ENTSOE_RENEWABLE_FORECAST_BENCHMARK:
+        from ..pipelines.renewable_generation import run_entsoe_renewable_forecast_benchmark
+
+        config = _load_nested_config(run_config, EntsoeRenewableForecastBenchmarkConfig)
+        run_entsoe_renewable_forecast_benchmark(config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.EXAA_NAIVE:
+        from ..pipelines.exaa_naive import run_exaa_naive_pipeline
+
+        config = _load_nested_config(run_config, ExaaNaiveConfig)
+        run_exaa_naive_pipeline(config=config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.FORECAST_ENSEMBLE:
+        from ..pipelines.forecast_ensemble import run_forecast_ensemble_pipeline
+
+        config = _load_nested_config(run_config, ForecastEnsembleConfig)
+        run_forecast_ensemble_pipeline(config=config, save_outputs=run_config.save_outputs)
+        return
+
     if kind == RunKind.LEAR_OPERATIONAL:
         from ..pipelines.lear import run_lear_operational_pipeline
 
@@ -59,6 +98,13 @@ def run_from_config(run_config: RunConfig, submit_override: bool = False) -> Non
 
         config = _load_nested_config(run_config, LearAncConfig)
         run_lear_anc_pipeline(config=config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.LOAD_FORECAST_MODEL:
+        from ..pipelines.load_forecast import run_load_forecast_pipeline
+
+        config = _load_nested_config(run_config, LoadForecastModelConfig)
+        run_load_forecast_pipeline(config=config, save_outputs=run_config.save_outputs)
         return
 
     if kind == RunKind.SQRA:
@@ -101,6 +147,48 @@ def run_from_config(run_config: RunConfig, submit_override: bool = False) -> Non
 
         config = _load_nested_config(run_config, IconAggregationConfig)
         run_aggregation(config)
+        return
+
+    if kind == RunKind.MASTR_CAPACITY:
+        from ..preprocessing.mastr_capacity import run_mastr_capacity
+
+        config = _load_nested_config(run_config, MastrCapacityConfig)
+        run_mastr_capacity(config)
+        return
+
+    if kind == RunKind.POPULATION_CLUSTER_WEIGHTS:
+        from ..preprocessing.population_cluster_weights import run_population_cluster_weights
+
+        config = _load_nested_config(run_config, PopulationClusterWeightsConfig)
+        run_population_cluster_weights(config)
+        return
+
+    if kind == RunKind.REGIONAL_RENEWABLE_FEATURES:
+        from ..preprocessing.regional_renewable_features import run_regional_renewable_features
+
+        config = _load_nested_config(run_config, RegionalRenewableFeatureConfig)
+        run_regional_renewable_features(config)
+        return
+
+    if kind == RunKind.RENEWABLE_GENERATION_MODEL:
+        from ..pipelines.renewable_generation import run_renewable_generation_pipeline
+
+        config = _load_nested_config(run_config, RenewableGenerationModelConfig)
+        run_renewable_generation_pipeline(config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.RENEWABLE_GENERATION_POSTPROCESS:
+        from ..pipelines.renewable_generation import run_renewable_generation_postprocess_pipeline
+
+        config = _load_nested_config(run_config, RenewableGenerationPostprocessConfig)
+        run_renewable_generation_postprocess_pipeline(config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.RENEWABLE_PROXY:
+        from ..preprocessing.renewable_proxy import run_renewable_proxy
+
+        config = _load_nested_config(run_config, RenewableProxyConfig)
+        run_renewable_proxy(config)
         return
 
     if kind == RunKind.ENERGY_ARENA_SUBMIT:

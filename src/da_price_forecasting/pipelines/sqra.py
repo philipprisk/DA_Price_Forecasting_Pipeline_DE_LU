@@ -20,12 +20,17 @@ def build_sqra_panel(config: SqraConfig) -> tuple[pd.DataFrame, list[str]]:
     forecasts = [load_forecast(path) for path in config.import_paths]
     feature_cols = [f"prediction_p{i + 1}" for i in range(len(forecasts))]
 
-    df_qra = pd.DataFrame(index=forecasts[0].index)
+    common_index = forecasts[0].index
+    for forecast in forecasts[1:]:
+        common_index = common_index.intersection(forecast.index)
+    common_index = common_index.sort_values()
+
+    df_qra = pd.DataFrame(index=common_index)
     for idx, fc in enumerate(forecasts):
-        df_qra[f"prediction_p{idx + 1}"] = fc["y_pred"]
+        df_qra[f"prediction_p{idx + 1}"] = fc.loc[common_index, "y_pred"]
 
     if "y_true" in forecasts[0].columns:
-        df_qra["y_true"] = forecasts[0]["y_true"]
+        df_qra["y_true"] = forecasts[0].loc[common_index, "y_true"]
     else:
         df_qra["y_true"] = pd.NA
     df_qra["mtu"] = df_qra.index.hour * 4 + df_qra.index.minute // 15
@@ -40,10 +45,9 @@ def run_sqra_pipeline(
     """Run the SQRA pipeline outside of the notebook."""
     df_qra, feature_cols = build_sqra_panel(config)
     forecast_days = pd.date_range(
-        start=pd.Timestamp(config.test_start).normalize(),
-        end=pd.Timestamp(config.test_end).normalize(),
+        start=pd.Timestamp(config.test_start).tz_convert(config.target_tz).normalize(),
+        end=pd.Timestamp(config.test_end).tz_convert(config.target_tz).normalize(),
         freq="D",
-        tz=config.target_tz,
     )
 
     forecast_df, runtime_df = rolling_sqra_forecast_mtu(

@@ -212,6 +212,12 @@ def process_variable_streaming(
         return
 
     folder_name = os.path.basename(var_dir)
+    if skip_existing:
+        existing_outpath, existing_outname = _infer_variable_output_path(files[0], output_dir)
+        if existing_outpath.exists():
+            print(f"Skipping existing: {existing_outname}")
+            return
+
     mask_flat = mask_germany.ravel()
     labels = cluster_labels
     n_clusters = int(np.max(labels)) + 1
@@ -331,6 +337,35 @@ def process_variable_streaming(
 
     del df, values, timestamps, timestamps_list, cluster_series
     gc.collect()
+
+
+def _infer_variable_output_path(first_file: str, output_dir: str) -> tuple[Path, str]:
+    """Infer the aggregated CSV filename from the first GRIB file before streaming all timesteps."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_grib = os.path.join(tmpdir, os.path.basename(first_file).replace(".bz2", ""))
+        with bz2.open(first_file, "rb") as src, open(tmp_grib, "wb") as dst:
+            dst.write(src.read())
+
+        ds = xr.open_dataset(tmp_grib, engine="cfgrib")
+        field_name = list(ds.data_vars)[0]
+        attrs = ds[field_name].attrs
+        units = attrs.get("units", "") or ""
+        step_type = (attrs.get("GRIB_stepType", "") or "").lower()
+        valid_time = ds.get("valid_time", None)
+        if valid_time is None:
+            tvals = ds.coords.get("time", None)
+            if tvals is None:
+                raise ValueError(f"No valid_time/time coordinate in {first_file}")
+            tvals = np.atleast_1d(tvals.values)
+        else:
+            tvals = np.atleast_1d(valid_time.values)
+        ds.close()
+
+    flux_suffix = "_instantaneous" if any(token in step_type for token in ["avg", "acc", "mean"]) else "_raw"
+    unit_safe = safe_unit_for_filename(units)
+    first_ts = pd.to_datetime(tvals[0]).strftime("%Y%m%d%H") if len(tvals) else "unknown"
+    outname = f"{field_name}_{unit_safe}_{first_ts}{flux_suffix}.csv"
+    return Path(output_dir) / outname, outname
 
 
 def run_aggregation(config: IconAggregationConfig) -> None:
@@ -455,4 +490,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

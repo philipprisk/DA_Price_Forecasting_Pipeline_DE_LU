@@ -34,6 +34,7 @@ data/processed/*
 !data/processed/.gitkeep
 *.grib
 *.idx
+data/mastr
 
 # Local model weights and package caches
 .cache/

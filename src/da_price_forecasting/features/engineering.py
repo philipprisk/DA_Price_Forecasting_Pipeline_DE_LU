@@ -225,6 +225,7 @@ def merge_all_features(
     df_price_features: pd.DataFrame,
     df_load_features: pd.DataFrame,
     df_time_features: pd.DataFrame,
+    extra_feature_blocks: list[pd.DataFrame] | None = None,
     dropna: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Merge all engineered feature blocks into one daily dataset."""
@@ -235,6 +236,9 @@ def merge_all_features(
         .join(df_time_features, how="inner")
         .sort_index()
     )
+    for feature_block in extra_feature_blocks or []:
+        if feature_block is not None and not feature_block.empty:
+            X = X.join(feature_block, how="inner").sort_index()
 
     nan_mask = X.isna().any(axis=1)
     dropped_info = pd.DataFrame(

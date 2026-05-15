@@ -143,6 +143,12 @@ def rolling_point_forecast(
     train_days: int,
     lars_start_date: pd.Timestamp,
     use_vst: bool = True,
+    lasso_cv_eps: float = 1e-3,
+    lasso_cv_alphas: int | list[float] = 100,
+    lasso_cv_tol: float = 1e-3,
+    lasso_cv_max_iter: int = 10_000,
+    lars_max_iter: int = 1000,
+    lars_max_n_alphas: int = 1000,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run rolling day-ahead LEAR point forecasts with MTU-specific models."""
     all_preds = []
@@ -181,9 +187,21 @@ def rolling_point_forecast(
             )
 
             if use_lars:
-                model = LassoLarsCV(cv=5, max_iter=1000, n_jobs=1)
+                model = LassoLarsCV(
+                    cv=5,
+                    max_iter=lars_max_iter,
+                    max_n_alphas=lars_max_n_alphas,
+                    n_jobs=1,
+                )
             else:
-                model = LassoCV(cv=5, tol=1e-3, max_iter=10_000, n_jobs=1)
+                model = LassoCV(
+                    cv=5,
+                    eps=lasso_cv_eps,
+                    alphas=lasso_cv_alphas,
+                    tol=lasso_cv_tol,
+                    max_iter=lasso_cv_max_iter,
+                    n_jobs=1,
+                )
 
             model.fit(X_tr_s.values, y_tr_s)
             y_pred_s = model.predict(X_te_s.values)
@@ -242,6 +260,12 @@ def rolling_point_forecast(
                 "train_days": train_days,
                 "use_vst": use_vst,
                 "use_lars": use_lars,
+                "lasso_cv_eps": lasso_cv_eps,
+                "lasso_cv_alphas": json.dumps(lasso_cv_alphas),
+                "lasso_cv_tol": lasso_cv_tol,
+                "lasso_cv_max_iter": lasso_cv_max_iter,
+                "lars_max_iter": lars_max_iter,
+                "lars_max_n_alphas": lars_max_n_alphas,
                 "runtime_seconds": day_runtime,
             }
         )
@@ -275,6 +299,60 @@ def compute_metrics(fc: pd.DataFrame, label: str) -> dict:
         "n_obs": len(fc),
         "n_inf_nan": n_inf_nan,
     }
+
+
+def apply_rolling_forecast_bias_correction(
+    forecast_df: pd.DataFrame,
+    train_days: int,
+    min_train_days: int,
+    by_hour: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Correct forecasts using only previously observed rolling forecast errors."""
+    corrected_parts = []
+    correction_records = []
+    daily_index = forecast_df.index.normalize()
+
+    for day in daily_index.unique().sort_values():
+        train_start = day - pd.Timedelta(days=train_days)
+        train_end = day - pd.Timedelta(minutes=15)
+        train_mask = (forecast_df.index >= train_start) & (forecast_df.index <= train_end)
+        test_mask = daily_index == day
+
+        train_days_available = forecast_df.index[train_mask].normalize().nunique()
+        correction = 0.0
+        day_forecast = forecast_df.loc[test_mask].copy()
+
+        if train_days_available >= min_train_days:
+            past_error = forecast_df.loc[train_mask, "y_pred"] - forecast_df.loc[train_mask, "y_true"]
+            correction = -float(past_error.mean())
+
+            if by_hour:
+                day_corrections = pd.Series(correction, index=day_forecast.index)
+                for hour in range(24):
+                    hour_train_mask = train_mask & (forecast_df.index.hour == hour)
+                    hour_days_available = forecast_df.index[hour_train_mask].normalize().nunique()
+                    if hour_days_available >= min_train_days:
+                        hour_error = (
+                            forecast_df.loc[hour_train_mask, "y_pred"]
+                            - forecast_df.loc[hour_train_mask, "y_true"]
+                        )
+                        hour_correction = -float(hour_error.mean())
+                        day_corrections.loc[day_corrections.index.hour == hour] = hour_correction
+                day_forecast["y_pred"] = day_forecast["y_pred"] + day_corrections
+            else:
+                day_forecast["y_pred"] = day_forecast["y_pred"] + correction
+
+        corrected_parts.append(day_forecast)
+        correction_records.append(
+            {
+                "forecast_day": day,
+                "train_days_available": int(train_days_available),
+                "bias_correction": correction,
+                "by_hour": bool(by_hour),
+            }
+        )
+
+    return pd.concat(corrected_parts).sort_index(), pd.DataFrame(correction_records)
 
 
 def save_experiment_outputs(
@@ -422,6 +500,12 @@ def rolling_anc_feature_importance(
     forecast_days: list[pd.Timestamp] | pd.DatetimeIndex,
     train_days: int,
     lars_start_date: pd.Timestamp,
+    lasso_cv_eps: float = 1e-3,
+    lasso_cv_alphas: int | list[float] = 100,
+    lasso_cv_tol: float = 1e-3,
+    lasso_cv_max_iter: int = 10_000,
+    lars_max_iter: int = 1000,
+    lars_max_n_alphas: int = 1000,
 ) -> pd.DataFrame:
     """Run a rolling ANC estimation with MTU-specific LEAR models."""
     anc_records = []
@@ -445,9 +529,21 @@ def rolling_anc_feature_importance(
             X_tr_s, X_te_s, _ = scale_fold_anc(X_tr=X_tr, X_te=X_te)
 
             if use_lars:
-                model = LassoLarsCV(cv=5, max_iter=1000, n_jobs=1)
+                model = LassoLarsCV(
+                    cv=5,
+                    max_iter=lars_max_iter,
+                    max_n_alphas=lars_max_n_alphas,
+                    n_jobs=1,
+                )
             else:
-                model = LassoCV(cv=5, tol=1e-3, max_iter=10_000, n_jobs=1)
+                model = LassoCV(
+                    cv=5,
+                    eps=lasso_cv_eps,
+                    alphas=lasso_cv_alphas,
+                    tol=lasso_cv_tol,
+                    max_iter=lasso_cv_max_iter,
+                    n_jobs=1,
+                )
 
             model.fit(X_tr_s.values, y_tr.values)
             beta_series = pd.Series(model.coef_, index=X_tr_s.columns, dtype=float)

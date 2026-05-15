@@ -1,0 +1,45 @@
+kind: load_forecast_model
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+  entsoe_start_date: "2025-08-01"
+  entsoe_end_date: "2026-04-23"
+  actual_load_file: data/processed/load_forecast/actual_load.csv
+  icon_dir: data/processed/icon_aggregated_c25_run06
+  export_dir: results/load_forecast_results/direct_c25_run06_weighted_weather
+
+  include_calendar_features: true
+  include_holiday_features: true
+  include_bridge_day_features: true
+  include_actual_load_lag_features: true
+  include_weather_features: true
+  include_weighted_weather_features: true
+  include_weather_time_interactions: true
+  weather_cluster_weight_file: data/processed/load_forecast/weather_cluster_population_weights_c25.csv
+  weather_cluster_id_column: cluster_id
+  weather_cluster_weight_column: weight
+  weather_weighted_feature_prefix: weather_weighted
+  calendar_harmonics: 3
+  actual_load_lag_days: [2, 3, 7, 14, 21]
+  target_availability_lag_days: 1
+
+  start_folder_date: "2025-08-01"
+  required_run: "06"
+  dwd_folder_offset_date: "2025-10-26"
+  skip_dates:
+    - "2025-10-26"
+    - "2025-10-27"
+    - "2025-10-28"
+
+  model_type: hist_gradient_boosting
+  train_days_rolling: 90
+  min_train_days: 30
+  test_start: "2025-12-01"
+  test_end: "2026-02-28"
+  hgb_max_iter: 400
+  hgb_learning_rate: 0.035
+  hgb_max_leaf_nodes: 31
+  hgb_l2_regularization: 0.2
+  random_state: 42

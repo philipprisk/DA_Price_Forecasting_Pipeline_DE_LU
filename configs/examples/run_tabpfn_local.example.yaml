@@ -17,13 +17,57 @@ config:
     - 0.5
     - 0.75
     - 0.9
-  use_exaa: true
-  use_load_forecast: true
+  features:
+    covariates:
+      - exaa
+      - load_forecast
+      # Add `commodities` here to use the Investing.com commodity instruments below.
+      # - commodities
+    ntc_neighbors:
+      - FR
+      - NL
+      - AT
+      - CH
+      - PL
+      - CZ
+      - DK_1
+      - DK_2
+    commodities:
+      provider: investiny
+      lag_days: 2
+      lookback_days: 14
+      instruments:
+        - name: gas_ttf
+          investing_id: 1178699
+          price_field: close
+        - name: brent_oil
+          investing_id: 8833
+          price_field: close
+        - name: co2_eua
+          investing_id: 8848
+          price_field: close
+        - name: coal_rotterdam
+          investing_id: 1112838
+          price_field: close
   price_lag_days:
     - 1
     - 2
     - 7
   add_calendar_features: true
+  curve_feature_sources:
+    - exaa
+    - load_forecast
+  engineered_features:
+    holiday: false
+    price_daily_stats: false
+    price_rolling_stats:
+      enabled: false
+      windows_days: [7]
+    covariate_ramps:
+      sources: []
+      horizons_mtu: [4, 12]
+    interactions:
+      seq2_minus_price_lag_d1: false
   train_window_days: 180
   max_train_rows: 1000
   n_estimators: 4

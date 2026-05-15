@@ -20,11 +20,36 @@ from .energy_arena import (
     TabpfnTsEnergyArenaSource,
 )
 from .evaluation import EvaluationConfig, EvaluationForecastConfig
+from .exaa_naive import ExaaNaiveConfig
+from .forecast_ensemble import ForecastEnsembleConfig, ForecastEnsembleSourceConfig
+from .features import CommodityConfig, CommodityInstrumentConfig, CovariateConfig, CovariateName
 from .lear import LearAncConfig, LearOperationalConfig
-from .preprocessing import Era5AggregationConfig, Era5DownloadConfig, IconAggregationConfig
+from .load_forecast import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
+from .preprocessing import (
+    EntsoeRenewableForecastBenchmarkConfig,
+    Era5AggregationConfig,
+    Era5DownloadConfig,
+    IconAggregationConfig,
+    MastrCapacityConfig,
+    PopulationClusterWeightsConfig,
+    RenewableGenerationPostprocessConfig,
+    RegionalRenewableFeatureConfig,
+    RenewableGenerationModelConfig,
+    RenewableProxyConfig,
+)
 from .run import RunConfig, RunKind
 from .sqra import SqraConfig
-from .tabpfn import TabpfnLocalConfig, TabpfnTsConfig
+from .tabpfn import (
+    TabpfnCommodityConfig,
+    TabpfnCommodityInstrumentConfig,
+    TabpfnCovariateRampConfig,
+    TabpfnFeatureConfig,
+    TabpfnInteractionFeatureConfig,
+    TabpfnLocalConfig,
+    TabpfnLocalEngineeringConfig,
+    TabpfnPriceRollingStatsConfig,
+    TabpfnTsConfig,
+)
 from .visualization import (
     VisualizationAncBarConfig,
     VisualizationAncHeatmapConfig,
@@ -39,23 +64,46 @@ __all__ = [
     "EnergyArenaObjective",
     "EnergyArenaPointSubmissionConfig",
     "EnergyArenaSubmissionConfig",
+    "EntsoeLoadForecastBenchmarkConfig",
+    "EntsoeRenewableForecastBenchmarkConfig",
     "Era5AggregationConfig",
     "Era5DownloadConfig",
     "EvaluationConfig",
     "EvaluationForecastConfig",
+    "ExaaNaiveConfig",
+    "ForecastEnsembleConfig",
+    "ForecastEnsembleSourceConfig",
     "ForecastFileEnergyArenaSource",
     "ForecastVariant",
     "IconAggregationConfig",
+    "MastrCapacityConfig",
+    "PopulationClusterWeightsConfig",
+    "RegionalRenewableFeatureConfig",
+    "RenewableGenerationModelConfig",
+    "RenewableGenerationPostprocessConfig",
+    "CommodityConfig",
+    "CommodityInstrumentConfig",
+    "CovariateConfig",
+    "CovariateName",
     "LearAncConfig",
+    "LoadForecastModelConfig",
     "LearOperationalConfig",
     "LearOperationalEnergyArenaSource",
     "RepoConfigModel",
+    "RenewableProxyConfig",
     "RunConfig",
     "RunKind",
     "SqraConfig",
     "SqraEnergyArenaSource",
+    "TabpfnCovariateRampConfig",
+    "TabpfnCommodityConfig",
+    "TabpfnCommodityInstrumentConfig",
     "TabpfnLocalConfig",
     "TabpfnLocalEnergyArenaSource",
+    "TabpfnFeatureConfig",
+    "TabpfnInteractionFeatureConfig",
+    "TabpfnLocalEngineeringConfig",
+    "TabpfnPriceRollingStatsConfig",
     "TabpfnTsConfig",
     "TabpfnTsEnergyArenaSource",
     "VisualizationAncBarConfig",

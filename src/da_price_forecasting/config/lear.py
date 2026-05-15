@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
 from ..paths import resolve_path
 from .base import ForecastVariant, RepoConfigModel, WeatherSource, _default_datetime, _parse_timestamp
+from .features import CovariateConfig
 
 
 class LearOperationalConfig(RepoConfigModel):
@@ -53,6 +54,18 @@ class LearOperationalConfig(RepoConfigModel):
     )
     train_days_rolling: int = 56
     n_clusters: int = 5
+    add_calendar_features: bool = False
+    add_scarcity_features: bool = False
+    lasso_cv_eps: float = 1e-3
+    lasso_cv_alphas: int | list[float] = 100
+    lasso_cv_tol: float = 1e-3
+    lasso_cv_max_iter: int = 10_000
+    lars_max_iter: int = 1000
+    lars_max_n_alphas: int = 1000
+    forecast_bias_correction: Literal["none", "rolling_mean_error", "rolling_hour_mean_error"] = "none"
+    forecast_bias_train_days: int = 28
+    forecast_bias_min_train_days: int = 7
+    features: CovariateConfig = Field(default_factory=CovariateConfig)
     export_dir: Path | None = None
 
     @field_validator(
@@ -95,7 +108,8 @@ class LearOperationalConfig(RepoConfigModel):
             variant_tag = "_fundamental"
 
         cluster_tag = f"_c{self.n_clusters}" if not self.use_exaa_only else ""
-        return f"lear_{weather_tag}{variant_tag}{cluster_tag}_d{self.train_days_rolling}"
+        covariate_tag = _covariate_tag(self.features.covariates)
+        return f"lear_{weather_tag}{variant_tag}{cluster_tag}{covariate_tag}_d{self.train_days_rolling}"
 
     @property
     def resolved_export_dir(self) -> Path:
@@ -149,8 +163,15 @@ class LearAncConfig(RepoConfigModel):
     )
     train_days_rolling: int = 112
     n_clusters: int = 5
+    lasso_cv_eps: float = 1e-3
+    lasso_cv_alphas: int | list[float] = 100
+    lasso_cv_tol: float = 1e-3
+    lasso_cv_max_iter: int = 10_000
+    lars_max_iter: int = 1000
+    lars_max_n_alphas: int = 1000
     mtu_window_wind: list[int] = Field(default_factory=lambda: list(range(96)))
     mtu_window_solar: list[int] = Field(default_factory=lambda: list(range(96)))
+    features: CovariateConfig = Field(default_factory=CovariateConfig)
     export_dir: Path | None = None
 
     @field_validator("entsoe_start_date", "entsoe_end_date", "lars_start_date", "test_start", "test_end", mode="before")
@@ -185,7 +206,8 @@ class LearAncConfig(RepoConfigModel):
             variant_tag = "_fundamental"
 
         cluster_tag = f"_c{self.n_clusters}" if not self.use_exaa_only else ""
-        return f"anc_{weather_tag}{variant_tag}{cluster_tag}_d{self.train_days_rolling}"
+        covariate_tag = _covariate_tag(self.features.covariates)
+        return f"anc_{weather_tag}{variant_tag}{cluster_tag}{covariate_tag}_d{self.train_days_rolling}"
 
     @property
     def resolved_export_dir(self) -> Path:
@@ -198,3 +220,17 @@ class LearAncConfig(RepoConfigModel):
         if self.use_exaa:
             return base / self.weather_source.value.lower() / f"c{self.n_clusters}" / f"d{self.train_days_rolling}" / "exaa"
         return base / self.weather_source.value.lower() / f"c{self.n_clusters}" / f"d{self.train_days_rolling}" / "fundamental"
+
+
+def _covariate_tag(covariates: list[str]) -> str:
+    if not covariates:
+        return ""
+    tags = {
+        "exaa": "exaa",
+        "load_forecast": "load",
+        "ntc": "ntc",
+        "generation_unavailability": "unavail",
+        "renewable_generation_proxy": "renewproxy",
+        "commodities": "commodities",
+    }
+    return "_" + "_".join(tags.get(covariate, covariate) for covariate in covariates)

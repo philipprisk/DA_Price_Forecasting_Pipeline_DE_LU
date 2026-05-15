@@ -12,6 +12,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from ..config import TabpfnTsConfig
+from ..features.covariates import build_timestamp_covariates, merge_timestamp_covariates
 
 
 def _load_env(repo_root: Path) -> None:
@@ -32,14 +33,14 @@ def _require_tabpfn_ts():
 
 def _require_entsoe_fetchers():
     try:
-        from ..data.entsoe import fetch_load_forecast, fetch_prices, fetch_prices_exaa
+        from ..data.entsoe import fetch_prices
     except ImportError as exc:
         raise ImportError(
             "entsoe-py is not installed. Install the TabPFN environment with "
             "`pixi install -e tabpfn` or run the command via `pixi run -e tabpfn ...`."
         ) from exc
 
-    return fetch_prices, fetch_prices_exaa, fetch_load_forecast
+    return fetch_prices
 
 
 def _prepared_tabpfn_model_config(config: TabpfnTsConfig) -> dict[str, Any]:
@@ -141,34 +142,28 @@ def _normalize_predictions(
     return result
 
 
-def _build_covariates(config: TabpfnTsConfig, start_day: pd.Timestamp, end_day: pd.Timestamp) -> pd.DataFrame:
-    _, fetch_prices_exaa, fetch_load_forecast = _require_entsoe_fetchers()
+def _merge_timestamp_covariates(
+    frames: list[pd.DataFrame],
+    index: pd.DatetimeIndex | None = None,
+) -> pd.DataFrame:
+    return merge_timestamp_covariates(frames, index=index)
 
-    frames = []
-    if config.use_exaa:
-        frames.append(
-            fetch_prices_exaa(
-                start_day=start_day,
-                end_day=end_day,
-                country_code=config.country_code_entsoe,
-                api_key_env=config.entsoe_api_key_env,
-                target_tz=config.target_tz,
-            )
-        )
-    if config.use_load_forecast:
-        frames.append(
-            fetch_load_forecast(
-                start_day=start_day,
-                end_day=end_day,
-                country_code=config.country_code_entsoe,
-                api_key_env=config.entsoe_api_key_env,
-                target_tz=config.target_tz,
-            )
-        )
 
-    if not frames:
+def _build_tabpfn_covariates(config: Any, start_day: pd.Timestamp, end_day: pd.Timestamp) -> pd.DataFrame:
+    if config.features is None:
         return pd.DataFrame()
-    return pd.concat(frames, axis=1).sort_index()
+    return build_timestamp_covariates(
+        config.features,
+        start_day=start_day,
+        end_day=end_day,
+        country_code_entsoe=config.country_code_entsoe,
+        entsoe_api_key_env=config.entsoe_api_key_env,
+        target_tz=config.target_tz,
+    )
+
+
+def _build_covariates(config: TabpfnTsConfig, start_day: pd.Timestamp, end_day: pd.Timestamp) -> pd.DataFrame:
+    return _build_tabpfn_covariates(config, start_day, end_day)
 
 
 def _forecast_days(config: TabpfnTsConfig) -> pd.DatetimeIndex:
@@ -232,7 +227,7 @@ def run_tabpfn_ts_pipeline(config: TabpfnTsConfig, save_outputs: bool = True) ->
         os.environ.setdefault("TABPFN_DISABLE_TELEMETRY", "1")
 
     TabPFNTSPipeline, TabPFNMode = _require_tabpfn_ts()
-    fetch_prices, _, _ = _require_entsoe_fetchers()
+    fetch_prices = _require_entsoe_fetchers()
     mode = TabPFNMode.CLIENT if config.tabpfn_mode == "client" else TabPFNMode.LOCAL
     tabpfn_model_config = _prepared_tabpfn_model_config(config)
     pipeline = TabPFNTSPipeline(
@@ -297,6 +292,7 @@ def run_tabpfn_ts_pipeline(config: TabpfnTsConfig, save_outputs: bool = True) ->
                 "tabpfn_model_config": tabpfn_model_config,
                 "use_exaa": config.use_exaa,
                 "use_load_forecast": config.use_load_forecast,
+                "covariates": ",".join(config.features.covariates if config.features is not None else []),
             }
         )
         print(f"  {forecast_day.date()}  TabPFN-TS  {runtime_seconds:.1f}s")

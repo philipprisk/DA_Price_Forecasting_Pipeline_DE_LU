@@ -1,0 +1,1508 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+from ..config import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
+from ..data.entsoe import fetch_actual_load, fetch_load_forecast
+from ..data.weather import load_dwd
+
+
+def _as_local_day(value: Any, target_tz: str) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tz is None:
+        timestamp = timestamp.tz_localize(target_tz)
+    else:
+        timestamp = timestamp.tz_convert(target_tz)
+    return timestamp.normalize()
+
+
+def _load_timestamp_csv(path: Path, target_tz: str) -> pd.DataFrame:
+    df = pd.read_csv(path, index_col=0)
+    df.index = pd.to_datetime(df.index, utc=True).tz_convert(target_tz)
+    df = df.sort_index()
+    df = df.loc[~df.index.duplicated(keep="last")]
+    df.index.name = "timestamp"
+    return df
+
+
+def _save_timestamp_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path)
+
+
+def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
+    if config.actual_load_file.exists():
+        return _load_timestamp_csv(config.actual_load_file, config.target_tz)
+
+    start = _as_local_day(config.entsoe_start_date, config.target_tz)
+    end = _as_local_day(config.entsoe_end_date, config.target_tz)
+    df = fetch_actual_load(
+        start_day=start,
+        end_day=end,
+        country_code=config.country_code_entsoe,
+        api_key_env=config.entsoe_api_key_env,
+        target_tz=config.target_tz,
+        chunk_days=config.chunk_days,
+    )
+    _save_timestamp_csv(df, config.actual_load_file)
+    return df
+
+
+def _load_or_fetch_entsoe_load_forecast(config: EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
+    return _load_or_fetch_load_forecast_to_file(config, config.forecast_file)
+
+
+def _load_or_fetch_model_entsoe_load_forecast(config: LoadForecastModelConfig) -> pd.DataFrame:
+    return _load_or_fetch_load_forecast_to_file(config, config.entsoe_load_forecast_file)
+
+
+def _load_or_fetch_load_forecast_to_file(
+    config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig,
+    forecast_file: Path,
+) -> pd.DataFrame:
+    if forecast_file.exists():
+        return _load_timestamp_csv(forecast_file, config.target_tz)
+
+    start = _as_local_day(config.entsoe_start_date, config.target_tz)
+    end = _as_local_day(config.entsoe_end_date, config.target_tz)
+    frames = []
+    current_start = start
+    while current_start <= end:
+        current_end = min(current_start + pd.Timedelta(days=config.chunk_days - 1), end)
+        frames.append(
+            fetch_load_forecast(
+                start_day=current_start,
+                end_day=current_end,
+                country_code=config.country_code_entsoe,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+            )
+        )
+        current_start = current_end + pd.Timedelta(days=1)
+
+    if not frames:
+        raise ValueError("No ENTSO-E load forecast data returned.")
+
+    df = pd.concat(frames).sort_index()
+    df = df.loc[~df.index.duplicated(keep="last")]
+    df.index.name = "timestamp"
+    _save_timestamp_csv(df, forecast_file)
+    return df
+
+
+def _build_calendar_features(
+    index: pd.DatetimeIndex,
+    *,
+    target_tz: str,
+    include_holidays: bool,
+    include_bridge_days: bool,
+    calendar_harmonics: int,
+) -> pd.DataFrame:
+    local_index = index.tz_convert(target_tz) if index.tz is not None else index.tz_localize(target_tz)
+    minute_of_day = local_index.hour * 60 + local_index.minute
+    mtu = local_index.hour * 4 + local_index.minute // 15
+    day_of_week = local_index.dayofweek
+    month = local_index.month
+    day_of_year = local_index.dayofyear
+
+    features = pd.DataFrame(index=index)
+    features["mtu"] = mtu.astype(float)
+    features["hour"] = local_index.hour.astype(float)
+    features["dayofweek"] = day_of_week.astype(float)
+    features["month"] = month.astype(float)
+    features["is_weekend"] = (day_of_week >= 5).astype(float)
+    features["mtu_sin"] = np.sin(2 * np.pi * mtu / 96)
+    features["mtu_cos"] = np.cos(2 * np.pi * mtu / 96)
+    features["minute_of_day_sin"] = np.sin(2 * np.pi * minute_of_day / 1440)
+    features["minute_of_day_cos"] = np.cos(2 * np.pi * minute_of_day / 1440)
+    features["dow_sin"] = np.sin(2 * np.pi * day_of_week / 7)
+    features["dow_cos"] = np.cos(2 * np.pi * day_of_week / 7)
+    features["month_sin"] = np.sin(2 * np.pi * month / 12)
+    features["month_cos"] = np.cos(2 * np.pi * month / 12)
+    iso_week = local_index.isocalendar().week.astype(float).to_numpy()
+    for harmonic in range(1, calendar_harmonics + 1):
+        suffix = "" if harmonic == 1 else f"_{harmonic}"
+        features[f"doy_sin{suffix}"] = np.sin(2 * np.pi * harmonic * day_of_year / 366)
+        features[f"doy_cos{suffix}"] = np.cos(2 * np.pi * harmonic * day_of_year / 366)
+        features[f"week_sin{suffix}"] = np.sin(2 * np.pi * harmonic * iso_week / 53)
+        features[f"week_cos{suffix}"] = np.cos(2 * np.pi * harmonic * iso_week / 53)
+
+    if include_holidays:
+        try:
+            import holidays
+        except ImportError as exc:
+            raise ImportError("Holiday load features require the optional `holidays` package.") from exc
+
+        years = sorted(set(local_index.year))
+        de_holidays = holidays.country_holidays("DE", years=years)
+        lu_holidays = holidays.country_holidays("LU", years=years)
+        local_dates = pd.Series(local_index.date, index=index)
+        features["is_holiday_de"] = local_dates.isin(set(de_holidays.keys())).astype(float)
+        features["is_holiday_lu"] = local_dates.isin(set(lu_holidays.keys())).astype(float)
+        features["is_holiday"] = features[["is_holiday_de", "is_holiday_lu"]].max(axis=1)
+        features["is_nonworkday"] = features[["is_weekend", "is_holiday"]].max(axis=1)
+        if include_bridge_days:
+            holiday_dates = set(de_holidays.keys()) | set(lu_holidays.keys())
+            current_dates = pd.Series(local_index.date, index=index)
+            previous_dates = current_dates - pd.Timedelta(days=1)
+            next_dates = current_dates + pd.Timedelta(days=1)
+            is_workday = (day_of_week < 5) & ~current_dates.isin(holiday_dates).to_numpy()
+            previous_holiday = previous_dates.isin(holiday_dates).to_numpy()
+            next_holiday = next_dates.isin(holiday_dates).to_numpy()
+            features["is_pre_holiday_workday"] = (is_workday & next_holiday).astype(float)
+            features["is_post_holiday_workday"] = (is_workday & previous_holiday).astype(float)
+            features["is_bridge_day"] = (
+                is_workday
+                & (
+                    ((day_of_week == 0) & next_holiday)
+                    | ((day_of_week == 4) & previous_holiday)
+                )
+            ).astype(float)
+
+    features.index.name = "timestamp"
+    return features
+
+
+_DE_NUTS1_TO_HOLIDAYS_SUBDIV = {
+    "DE1": "BW",
+    "DE2": "BY",
+    "DE3": "BE",
+    "DE4": "BB",
+    "DE5": "HB",
+    "DE6": "HH",
+    "DE7": "HE",
+    "DE8": "MV",
+    "DE9": "NI",
+    "DEA": "NW",
+    "DEB": "RP",
+    "DEC": "SL",
+    "DED": "SN",
+    "DEE": "ST",
+    "DEF": "SH",
+    "DEG": "TH",
+}
+
+
+def _load_region_weights(
+    path: Path,
+    *,
+    region_column: str,
+    weight_column: str,
+) -> pd.Series:
+    if not path.exists():
+        raise FileNotFoundError(f"Regional holiday weight file does not exist: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        df = pd.read_parquet(path)
+    elif suffix in {".csv", ".txt"}:
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported regional holiday weight file format: {path.suffix}")
+
+    missing_columns = [column for column in [region_column, weight_column] if column not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Regional holiday weight file is missing columns: {missing_columns}")
+
+    weights = df[[region_column, weight_column]].dropna().copy()
+    weights[region_column] = weights[region_column].astype(str).str.strip().str.upper()
+    weights[weight_column] = pd.to_numeric(weights[weight_column], errors="coerce")
+    weights = weights.dropna(subset=[region_column, weight_column])
+    weights = weights.groupby(region_column, sort=True)[weight_column].sum()
+    weights = weights[np.isfinite(weights) & (weights > 0.0)]
+    if weights.empty:
+        raise ValueError("Regional holiday weight file contains no positive weights.")
+    return weights.sort_index()
+
+
+def _region_holiday_dates(region: str, years: list[int]) -> set[Any]:
+    try:
+        import holidays
+    except ImportError as exc:
+        raise ImportError("Regional holiday load features require the optional `holidays` package.") from exc
+
+    if region.startswith("LU"):
+        return set(holidays.country_holidays("LU", years=years).keys())
+    if region.startswith("DE"):
+        subdiv = _DE_NUTS1_TO_HOLIDAYS_SUBDIV.get(region[:3])
+        if subdiv is None:
+            return set(holidays.country_holidays("DE", years=years).keys())
+        return set(holidays.country_holidays("DE", subdiv=subdiv, years=years).keys())
+    return set()
+
+
+def _daily_region_holiday_flags(dates: pd.Series, holiday_dates: set[Any]) -> pd.DataFrame:
+    date_index = pd.Index(dates)
+    date_timestamps = pd.to_datetime(date_index)
+    day_of_week = date_timestamps.dayofweek.to_numpy()
+    current_dates = pd.Series(date_timestamps.date, index=date_index)
+    previous_dates = pd.Series((date_timestamps - pd.Timedelta(days=1)).date, index=date_index)
+    next_dates = pd.Series((date_timestamps + pd.Timedelta(days=1)).date, index=date_index)
+
+    is_holiday = current_dates.isin(holiday_dates).to_numpy()
+    is_weekend = day_of_week >= 5
+    is_workday = (day_of_week < 5) & ~is_holiday
+    previous_holiday = previous_dates.isin(holiday_dates).to_numpy()
+    next_holiday = next_dates.isin(holiday_dates).to_numpy()
+    is_bridge_day = (
+        is_workday
+        & (
+            ((day_of_week == 0) & next_holiday)
+            | ((day_of_week == 4) & previous_holiday)
+        )
+    )
+    return pd.DataFrame(
+        {
+            "public_holiday_share": is_holiday.astype(float),
+            "nonworkday_share": (is_weekend | is_holiday).astype(float),
+            "pre_holiday_workday_share": (is_workday & next_holiday).astype(float),
+            "post_holiday_workday_share": (is_workday & previous_holiday).astype(float),
+            "bridge_day_share": is_bridge_day.astype(float),
+        },
+        index=date_index,
+    )
+
+
+def _build_regional_holiday_features(
+    index: pd.DatetimeIndex,
+    *,
+    target_tz: str,
+    weight_file: Path,
+    region_column: str,
+    weight_column: str,
+    feature_prefix: str,
+) -> pd.DataFrame:
+    local_index = index.tz_convert(target_tz) if index.tz is not None else index.tz_localize(target_tz)
+    local_dates = pd.Series(local_index.date, index=index)
+    unique_dates = pd.Index(sorted(local_dates.unique()), name="date")
+    years = sorted({date.year for date in unique_dates})
+    region_weights = _load_region_weights(weight_file, region_column=region_column, weight_column=weight_column)
+    total_weight = float(region_weights.sum())
+
+    weighted_daily = pd.DataFrame(
+        0.0,
+        index=unique_dates,
+        columns=[
+            "public_holiday_share",
+            "nonworkday_share",
+            "pre_holiday_workday_share",
+            "post_holiday_workday_share",
+            "bridge_day_share",
+        ],
+    )
+    for region, weight in region_weights.items():
+        holiday_dates = _region_holiday_dates(str(region), years)
+        if not holiday_dates:
+            continue
+        region_flags = _daily_region_holiday_flags(unique_dates, holiday_dates)
+        weighted_daily = weighted_daily.add(region_flags * float(weight), fill_value=0.0)
+
+    weighted_daily = weighted_daily / total_weight
+    weighted_daily = weighted_daily.rename(columns={column: f"{feature_prefix}_{column}" for column in weighted_daily.columns})
+    features = weighted_daily.reindex(local_dates.to_numpy()).set_index(index)
+    features.index.name = "timestamp"
+    return features.astype(float)
+
+
+def _add_weather_time_interactions(
+    features: pd.DataFrame,
+    *,
+    weighted_weather_prefix: str = "weather_weighted",
+) -> pd.DataFrame:
+    if features.empty or "mtu_sin" not in features.columns or "mtu_cos" not in features.columns:
+        return features
+
+    def is_temperature_column(column: str) -> bool:
+        if "_daily_" in column:
+            return False
+        if column.startswith("weather_t2m_C_cluster_"):
+            return True
+        if column.startswith("weather_hdd") and "_cluster_" in column:
+            return True
+        if column.startswith("weather_cdd") and "_cluster_" in column:
+            return True
+        if column.startswith(f"{weighted_weather_prefix}_t2m_C"):
+            return True
+        if column.startswith(f"{weighted_weather_prefix}_hdd"):
+            return True
+        if column.startswith(f"{weighted_weather_prefix}_cdd"):
+            return True
+        return False
+
+    weather_columns = [
+        column
+        for column in features.columns
+        if is_temperature_column(column)
+    ]
+    if not weather_columns:
+        return features
+
+    interaction_data: dict[str, pd.Series] = {}
+    for column in weather_columns:
+        interaction_data[f"{column}_x_mtu_sin"] = features[column] * features["mtu_sin"]
+        interaction_data[f"{column}_x_mtu_cos"] = features[column] * features["mtu_cos"]
+        if "is_weekend" in features.columns:
+            interaction_data[f"{column}_x_weekend"] = features[column] * features["is_weekend"]
+        if "is_nonworkday" in features.columns:
+            interaction_data[f"{column}_x_nonworkday"] = features[column] * features["is_nonworkday"]
+
+    interactions = pd.DataFrame(interaction_data, index=features.index)
+    return pd.concat([features, interactions], axis=1)
+
+
+def _build_actual_load_lag_features(
+    actual_load: pd.DataFrame,
+    index: pd.DatetimeIndex,
+    lag_days: list[int],
+) -> pd.DataFrame:
+    if "load_actual" not in actual_load.columns:
+        raise ValueError("Actual load data must contain a 'load_actual' column.")
+
+    base = actual_load["load_actual"].astype(float).sort_index()
+    features = pd.DataFrame(index=index)
+    for lag_day in sorted({int(day) for day in lag_days if int(day) > 0}):
+        lagged = base.copy()
+        lagged.index = lagged.index + pd.Timedelta(days=lag_day)
+        features[f"Load_Actual_MW_lag_d{lag_day}"] = lagged.reindex(index).astype(float)
+
+    features.index.name = "timestamp"
+    return features
+
+
+def _window_label(start_hour: int, end_hour_inclusive: int, end_minute_inclusive: int = 45) -> str:
+    end_label = (
+        f"{end_hour_inclusive:02d}"
+        if end_minute_inclusive == 45
+        else f"{end_hour_inclusive:02d}{end_minute_inclusive:02d}"
+    )
+    return f"{start_hour:02d}_{end_label}"
+
+
+def _actual_load_window_stats(
+    actual_load: pd.DataFrame,
+    *,
+    target_tz: str,
+    start_hour: int,
+    end_hour_inclusive: int,
+    end_minute_inclusive: int = 45,
+) -> pd.DataFrame:
+    if "load_actual" not in actual_load.columns:
+        raise ValueError("Actual load data must contain a 'load_actual' column.")
+
+    base = actual_load[["load_actual"]].astype(float).sort_index().copy()
+    local_index = base.index.tz_convert(target_tz) if base.index.tz is not None else base.index.tz_localize(target_tz)
+    minute_of_day = local_index.hour * 60 + local_index.minute
+    window_start = start_hour * 60
+    window_end = end_hour_inclusive * 60 + end_minute_inclusive
+    window_mask = (minute_of_day >= window_start) & (minute_of_day <= window_end)
+    window = base.loc[window_mask].copy()
+    window["_date"] = pd.Index(local_index[window_mask].date)
+    grouped = window.groupby("_date")["load_actual"]
+    return grouped.agg(["mean", "min", "max", "last"]).sort_index()
+
+
+def _build_partial_load_features(
+    actual_load: pd.DataFrame,
+    index: pd.DatetimeIndex,
+    *,
+    target_tz: str,
+    reference_day: int,
+    comparison_lag_days: int,
+    morning_end_hour: int,
+    morning_end_minute: int = 45,
+) -> pd.DataFrame:
+    local_index = index.tz_convert(target_tz) if index.tz is not None else index.tz_localize(target_tz)
+    local_dates = pd.Series(local_index.date, index=index)
+    target_dates = pd.Index(sorted(local_dates.unique()), name="date")
+    source_dates = pd.Index((pd.to_datetime(target_dates) - pd.Timedelta(days=reference_day)).date)
+    comparison_dates = pd.Index((pd.to_datetime(source_dates) - pd.Timedelta(days=comparison_lag_days)).date)
+
+    windows = [
+        (0, morning_end_hour),
+        (6, morning_end_hour),
+        (9, morning_end_hour),
+    ]
+    daily_features = pd.DataFrame(index=target_dates)
+    for start_hour, end_hour in windows:
+        if start_hour * 60 > end_hour * 60 + morning_end_minute:
+            continue
+        label = _window_label(start_hour, end_hour, morning_end_minute)
+        stats = _actual_load_window_stats(
+            actual_load,
+            target_tz=target_tz,
+            start_hour=start_hour,
+            end_hour_inclusive=end_hour,
+            end_minute_inclusive=morning_end_minute,
+        )
+        source = stats.reindex(source_dates)
+        source.index = target_dates
+        for stat in ["mean", "min", "max", "last"]:
+            daily_features[f"partial_load_d{reference_day}_{label}_{stat}"] = source[stat].to_numpy(dtype=float)
+
+        comparison = stats.reindex(comparison_dates)
+        comparison.index = target_dates
+        daily_features[f"partial_load_d{reference_day}_{label}_mean_diff_d{comparison_lag_days}"] = (
+            source["mean"] - comparison["mean"]
+        ).to_numpy(dtype=float)
+        daily_features[f"partial_load_d{reference_day}_{label}_last_diff_d{comparison_lag_days}"] = (
+            source["last"] - comparison["last"]
+        ).to_numpy(dtype=float)
+
+    features = daily_features.reindex(local_dates.to_numpy()).set_index(index)
+    features.index.name = "timestamp"
+    return features.astype(float)
+
+
+def _build_entsoe_forecast_features(
+    config: LoadForecastModelConfig,
+    index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    forecast = _load_or_fetch_model_entsoe_load_forecast(config)
+    if "load_fc" not in forecast.columns:
+        raise ValueError("ENTSO-E load forecast data must contain a 'load_fc' column.")
+    features = forecast[["load_fc"]].rename(columns={"load_fc": "Load_Benchmark_MW"})
+    features = features.reindex(index).astype(float)
+    features.index.name = "timestamp"
+    return features
+
+
+def _entsoe_error_series(actual_load: pd.DataFrame, forecast: pd.DataFrame) -> pd.Series:
+    if "load_actual" not in actual_load.columns:
+        raise ValueError("Actual load data must contain a 'load_actual' column.")
+    if "load_fc" not in forecast.columns:
+        raise ValueError("ENTSO-E load forecast data must contain a 'load_fc' column.")
+
+    frame = actual_load[["load_actual"]].astype(float).join(forecast[["load_fc"]].astype(float), how="inner")
+    error = frame["load_actual"] - frame["load_fc"]
+    error.name = "entsoe_load_error"
+    return error.sort_index()
+
+
+def _time_group_values(index: pd.DatetimeIndex, group: str) -> pd.Series:
+    if group == "global":
+        values = np.zeros(len(index), dtype=int)
+    elif group == "hour":
+        values = index.hour
+    elif group == "mtu":
+        values = index.hour * 4 + index.minute // 15
+    else:
+        raise ValueError(f"Unsupported time group: {group!r}")
+    return pd.Series(values, index=index)
+
+
+def _build_entsoe_error_features(
+    config: LoadForecastModelConfig,
+    actual_load: pd.DataFrame,
+    index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    forecast = _load_or_fetch_model_entsoe_load_forecast(config)
+    error = _entsoe_error_series(actual_load, forecast)
+    features = pd.DataFrame(index=index)
+
+    if config.include_entsoe_error_lag_features:
+        for lag_day in sorted({int(day) for day in config.entsoe_error_lag_days if int(day) > 0}):
+            lagged = error.copy()
+            lagged.index = lagged.index + pd.Timedelta(days=lag_day)
+            features[f"Entsoe_Load_Error_MW_lag_d{lag_day}"] = lagged.reindex(index).astype(float)
+
+    if config.include_entsoe_error_rolling_features:
+        local_index = index.tz_convert(config.target_tz) if index.tz is not None else index.tz_localize(config.target_tz)
+        local_days = pd.Series(local_index.normalize(), index=index)
+        unique_days = pd.DatetimeIndex(local_days.unique()).sort_values()
+        error_frame = error.to_frame("error")
+        error_frame = error_frame.loc[~error_frame.index.duplicated(keep="last")].sort_index()
+
+        for group in config.entsoe_error_rolling_groups:
+            if group == "global":
+                history_group_values = pd.Series(0, index=error_frame.index)
+                target_group_values = pd.Series(0, index=index)
+            else:
+                history_group_values = _time_group_values(error_frame.index, group)
+                target_group_values = _time_group_values(index, group)
+
+            for window_day in sorted({int(day) for day in config.entsoe_error_rolling_windows_days if int(day) > 0}):
+                column = f"Entsoe_Load_Error_MW_{group}_mean_{window_day}d"
+                values = pd.Series(np.nan, index=index, dtype=float)
+                window = pd.Timedelta(days=window_day)
+                for day in unique_days:
+                    cutoff = day - pd.Timedelta(days=config.target_availability_lag_days) - pd.Timedelta(minutes=15)
+                    window_start = cutoff - window + pd.Timedelta(minutes=15)
+                    history_mask = (
+                        (error_frame.index >= window_start)
+                        & (error_frame.index <= cutoff)
+                        & error_frame["error"].notna()
+                    )
+                    day_mask = local_days == day
+                    if not history_mask.any() or not day_mask.any():
+                        continue
+
+                    history = error_frame.loc[history_mask, "error"]
+                    if group == "global":
+                        if len(history) >= config.entsoe_error_rolling_min_observations:
+                            values.loc[day_mask] = float(history.mean())
+                        continue
+
+                    grouped = history.groupby(history_group_values.loc[history_mask]).agg(["mean", "count"])
+                    eligible = grouped.loc[grouped["count"] >= config.entsoe_error_rolling_min_observations, "mean"]
+                    if eligible.empty:
+                        continue
+                    values.loc[day_mask] = target_group_values.loc[day_mask].map(eligible).to_numpy(dtype=float)
+
+                features[column] = values
+
+    features.index.name = "timestamp"
+    return features
+
+
+def _cluster_id(column: str) -> str:
+    return column.rsplit("_", 1)[-1]
+
+
+def _split_weather_cluster_column(column: str) -> tuple[str, int] | None:
+    marker = "_cluster_"
+    if marker not in column:
+        return None
+    base_name, cluster_id = column.rsplit(marker, 1)
+    if not base_name.startswith("weather_") or not cluster_id.isdigit():
+        return None
+    return base_name, int(cluster_id)
+
+
+def _load_cluster_weights(
+    path: Path,
+    *,
+    cluster_id_column: str,
+    weight_column: str,
+) -> pd.Series:
+    if not path.exists():
+        raise FileNotFoundError(f"Weather cluster weight file does not exist: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        df = pd.read_parquet(path)
+    elif suffix in {".csv", ".txt"}:
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported weather cluster weight file format: {path.suffix}")
+
+    missing_columns = [column for column in [cluster_id_column, weight_column] if column not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Weather cluster weight file is missing columns: {missing_columns}")
+
+    weights = df[[cluster_id_column, weight_column]].dropna().copy()
+    weights[cluster_id_column] = weights[cluster_id_column].astype(int)
+    weights[weight_column] = weights[weight_column].astype(float)
+    weights = weights.groupby(cluster_id_column, sort=True)[weight_column].sum()
+    weights = weights[np.isfinite(weights) & (weights > 0.0)]
+    if weights.empty:
+        raise ValueError("Weather cluster weight file contains no positive weights.")
+
+    weights.index = weights.index.astype(int)
+    return weights.sort_index()
+
+
+def _weighted_weather_column_name(base_name: str, prefix: str) -> str:
+    if base_name.startswith("weather_"):
+        return f"{prefix}_{base_name.removeprefix('weather_')}"
+    return f"{prefix}_{base_name}"
+
+
+def _normalise_weather_base_names(base_names: list[str] | None) -> set[str] | None:
+    if not base_names:
+        return None
+    normalised = set()
+    for base_name in base_names:
+        name = str(base_name).strip()
+        if not name:
+            continue
+        normalised.add(name if name.startswith("weather_") else f"weather_{name}")
+    return normalised or None
+
+
+def _add_weighted_weather_features(
+    features: pd.DataFrame,
+    cluster_weights: pd.Series,
+    *,
+    prefix: str = "weather_weighted",
+    base_names: list[str] | None = None,
+) -> pd.DataFrame:
+    if features.empty or cluster_weights.empty:
+        return features
+
+    allowed_base_names = _normalise_weather_base_names(base_names)
+    grouped_columns: dict[str, list[tuple[int, str]]] = {}
+    for column in features.columns:
+        parsed = _split_weather_cluster_column(column)
+        if parsed is None:
+            continue
+        base_name, cluster_id = parsed
+        if allowed_base_names is not None and base_name not in allowed_base_names:
+            continue
+        grouped_columns.setdefault(base_name, []).append((cluster_id, column))
+
+    weighted_data: dict[str, pd.Series] = {}
+    for base_name, cluster_columns in grouped_columns.items():
+        available = [
+            (cluster_id, column)
+            for cluster_id, column in sorted(cluster_columns)
+            if cluster_id in cluster_weights.index
+        ]
+        if not available:
+            continue
+
+        columns = [column for _, column in available]
+        weights = pd.Series(
+            {column: float(cluster_weights.loc[cluster_id]) for cluster_id, column in available},
+            dtype=float,
+        )
+        values = features[columns].astype(float)
+        denominator = values.notna().mul(weights, axis=1).sum(axis=1)
+        numerator = values.mul(weights, axis=1).sum(axis=1, min_count=1)
+        weighted_data[_weighted_weather_column_name(base_name, prefix)] = numerator / denominator.replace(0.0, np.nan)
+
+    if not weighted_data:
+        return features
+
+    weighted_features = pd.DataFrame(weighted_data, index=features.index)
+    result = pd.concat([features, weighted_features], axis=1)
+    return result.loc[:, ~result.columns.duplicated()]
+
+
+def _drop_weather_cluster_features(features: pd.DataFrame) -> pd.DataFrame:
+    keep_columns = [
+        column
+        for column in features.columns
+        if _split_weather_cluster_column(column) is None
+    ]
+    return features[keep_columns]
+
+
+def _add_weighted_weather_daily_features(
+    features: pd.DataFrame,
+    *,
+    prefix: str,
+    base_names: list[str] | None,
+    stats: list[str],
+    lag_days: list[int],
+) -> pd.DataFrame:
+    if features.empty:
+        return features
+
+    bases = base_names or ["t2m_C", "hdd18", "cdd22"]
+    columns = [
+        f"{prefix}_{base_name.removeprefix('weather_').removeprefix(prefix + '_')}"
+        for base_name in bases
+    ]
+    columns = [column for column in columns if column in features.columns]
+    if not columns:
+        return features
+
+    local_days = pd.Series(features.index.normalize(), index=features.index)
+    unique_days = pd.DatetimeIndex(local_days.unique()).sort_values()
+    daily_features = pd.DataFrame(index=unique_days)
+    for column in columns:
+        grouped = features[column].groupby(local_days)
+        daily_stat_frame = pd.DataFrame(index=unique_days)
+        if "mean" in stats:
+            daily_stat_frame["mean"] = grouped.mean().reindex(unique_days)
+        if "min" in stats:
+            daily_stat_frame["min"] = grouped.min().reindex(unique_days)
+        if "max" in stats:
+            daily_stat_frame["max"] = grouped.max().reindex(unique_days)
+        if "range" in stats:
+            daily_stat_frame["range"] = grouped.max().reindex(unique_days) - grouped.min().reindex(unique_days)
+
+        for stat in daily_stat_frame.columns:
+            daily_features[f"{column}_daily_{stat}"] = daily_stat_frame[stat]
+            for lag_day in sorted({int(day) for day in lag_days if int(day) > 0}):
+                lagged = daily_stat_frame[stat].copy()
+                lagged.index = lagged.index + pd.Timedelta(days=lag_day)
+                daily_features[f"{column}_daily_{stat}_diff_d{lag_day}"] = daily_stat_frame[stat] - lagged.reindex(unique_days)
+
+    expanded = daily_features.reindex(local_days.to_numpy()).set_index(features.index)
+    expanded.index.name = features.index.name
+    result = pd.concat([features, expanded], axis=1)
+    return result.loc[:, ~result.columns.duplicated()]
+
+
+def _temperature_threshold_label(value: float) -> str:
+    numeric = float(value)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:g}".replace("-", "m").replace(".", "p")
+
+
+def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFrame:
+    df_hourly, df_qh = load_dwd(
+        icon_dir=config.icon_dir,
+        start_folder_date=config.start_folder_date,
+        required_run=config.required_run,
+        skip_dates=set(config.skip_dates),
+        folder_offset_date=config.dwd_folder_offset_date,
+        target_tz=config.target_tz,
+    )
+
+    hdd_thresholds = config.weather_hdd_thresholds if config.include_rich_temperature_features else [18.0]
+    cdd_thresholds = config.weather_cdd_thresholds if config.include_rich_temperature_features else [22.0]
+    hourly_data: dict[str, np.ndarray] = {}
+    for column in sorted(col for col in df_hourly.columns if col.startswith("t2m_cluster_")):
+        cluster = _cluster_id(column)
+        temp_c = df_hourly[column].to_numpy(dtype=float) - 273.15
+        hourly_data[f"weather_t2m_C_cluster_{cluster}"] = temp_c
+        for threshold in hdd_thresholds:
+            label = _temperature_threshold_label(threshold)
+            hourly_data[f"weather_hdd{label}_cluster_{cluster}"] = np.clip(float(threshold) - temp_c, 0.0, None)
+        for threshold in cdd_thresholds:
+            label = _temperature_threshold_label(threshold)
+            hourly_data[f"weather_cdd{label}_cluster_{cluster}"] = np.clip(temp_c - float(threshold), 0.0, None)
+
+    for column in sorted(col for col in df_hourly.columns if col.startswith("td2m_cluster_")):
+        cluster = _cluster_id(column)
+        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = df_hourly[column].to_numpy(dtype=float) - 273.15
+
+    for prefix, name in [
+        ("sp_cluster_", "weather_sp_Pa"),
+        ("tp_cluster_", "weather_precip"),
+        ("sde_cluster_", "weather_snow_depth"),
+        ("snow_gsp_cluster_", "weather_snowfall"),
+        ("vmax10m_cluster_", "weather_vmax10m"),
+    ]:
+        for column in sorted(col for col in df_hourly.columns if col.startswith(prefix)):
+            hourly_data[f"{name}_cluster_{_cluster_id(column)}"] = df_hourly[column].to_numpy(dtype=float)
+
+    for u_col in sorted(col for col in df_hourly.columns if col.startswith("u10_cluster_")):
+        cluster = _cluster_id(u_col)
+        v_col = f"v10_cluster_{cluster}"
+        if v_col not in df_hourly.columns:
+            continue
+        speed = np.sqrt(df_hourly[u_col].to_numpy(dtype=float) ** 2 + df_hourly[v_col].to_numpy(dtype=float) ** 2)
+        hourly_data[f"weather_wind_speed_10m_cluster_{cluster}"] = speed
+
+    hourly_features = pd.DataFrame(hourly_data, index=df_hourly.index)
+
+    qh_data: dict[str, np.ndarray] = {}
+    for dir_col in sorted(col for col in df_qh.columns if col.startswith("ASWDIR_cluster_")):
+        cluster = _cluster_id(dir_col)
+        dif_col = f"ASWDIFD_cluster_{cluster}"
+        if dif_col not in df_qh.columns:
+            continue
+        direct = np.clip(df_qh[dir_col].to_numpy(dtype=float), 0.0, None)
+        diffuse = np.clip(df_qh[dif_col].to_numpy(dtype=float), 0.0, None)
+        qh_data[f"weather_solar_direct_cluster_{cluster}"] = direct
+        qh_data[f"weather_solar_diffuse_cluster_{cluster}"] = diffuse
+        qh_data[f"weather_solar_global_cluster_{cluster}"] = direct + diffuse
+
+    qh_features = pd.DataFrame(qh_data, index=df_qh.index)
+
+    full_index = pd.date_range(
+        start=min(hourly_features.index.min(), qh_features.index.min()),
+        end=max(hourly_features.index.max(), qh_features.index.max()),
+        freq="15min",
+        tz=config.target_tz,
+        name="timestamp",
+    )
+    hourly_features = hourly_features.loc[~hourly_features.index.duplicated(keep="last")].reindex(full_index).ffill(limit=3)
+    qh_features = qh_features.loc[~qh_features.index.duplicated(keep="last")].reindex(full_index)
+    features = pd.concat([hourly_features, qh_features], axis=1).sort_index()
+    features.index.name = "timestamp"
+    return features
+
+
+def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame:
+    """Build timestamp-level direct-load features and actual-load targets."""
+    actual = _load_or_fetch_actual_load(config)
+
+    feature_blocks: list[pd.DataFrame] = []
+    if config.include_weather_features:
+        weather = _build_load_weather_features(config)
+        feature_index = weather.index
+        feature_blocks.append(weather)
+    else:
+        feature_index = actual.index
+
+    if config.include_calendar_features:
+        feature_blocks.append(
+            _build_calendar_features(
+                feature_index,
+                target_tz=config.target_tz,
+                include_holidays=config.include_holiday_features,
+                include_bridge_days=config.include_bridge_day_features,
+                calendar_harmonics=config.calendar_harmonics,
+            )
+        )
+
+    if config.include_regional_holiday_features:
+        if config.regional_holiday_weight_file is None:
+            raise ValueError("regional_holiday_weight_file is required when include_regional_holiday_features is true.")
+        feature_blocks.append(
+            _build_regional_holiday_features(
+                feature_index,
+                target_tz=config.target_tz,
+                weight_file=config.regional_holiday_weight_file,
+                region_column=config.regional_holiday_region_column,
+                weight_column=config.regional_holiday_weight_column,
+                feature_prefix=config.regional_holiday_feature_prefix,
+            )
+        )
+
+    if config.include_entsoe_forecast_features or config.load_target_mode == "entsoe_residual":
+        feature_blocks.append(_build_entsoe_forecast_features(config, feature_index))
+
+    if config.include_entsoe_error_lag_features or config.include_entsoe_error_rolling_features:
+        feature_blocks.append(
+            _build_entsoe_error_features(
+                config=config,
+                actual_load=actual,
+                index=feature_index,
+            )
+        )
+
+    if config.include_partial_load_features:
+        feature_blocks.append(
+            _build_partial_load_features(
+                actual_load=actual,
+                index=feature_index,
+                target_tz=config.target_tz,
+                reference_day=config.partial_load_reference_day,
+                comparison_lag_days=config.partial_load_comparison_lag_days,
+                morning_end_hour=config.partial_load_morning_end_hour,
+                morning_end_minute=config.partial_load_morning_end_minute,
+            )
+        )
+
+    if config.include_actual_load_lag_features:
+        feature_blocks.append(
+            _build_actual_load_lag_features(
+                actual_load=actual,
+                index=feature_index,
+                lag_days=config.actual_load_lag_days,
+            )
+        )
+
+    if not feature_blocks:
+        raise ValueError("At least one load forecast feature block must be enabled.")
+
+    features = pd.concat(feature_blocks, axis=1).sort_index()
+    features = features.loc[:, ~features.columns.duplicated()]
+    if config.include_weighted_weather_features:
+        if config.weather_cluster_weight_file is None:
+            raise ValueError("weather_cluster_weight_file is required when include_weighted_weather_features is true.")
+        cluster_weights = _load_cluster_weights(
+            config.weather_cluster_weight_file,
+            cluster_id_column=config.weather_cluster_id_column,
+            weight_column=config.weather_cluster_weight_column,
+        )
+        features = _add_weighted_weather_features(
+            features,
+            cluster_weights,
+            prefix=config.weather_weighted_feature_prefix,
+            base_names=config.weather_weighted_feature_bases,
+        )
+        if config.include_weighted_weather_daily_features:
+            features = _add_weighted_weather_daily_features(
+                features,
+                prefix=config.weather_weighted_feature_prefix,
+                base_names=config.weighted_weather_daily_feature_bases or config.weather_weighted_feature_bases,
+                stats=config.weighted_weather_daily_stats,
+                lag_days=config.weighted_weather_daily_lag_days,
+            )
+        if not config.keep_weather_cluster_features:
+            features = _drop_weather_cluster_features(features)
+    if config.include_weather_time_interactions:
+        features = _add_weather_time_interactions(
+            features,
+            weighted_weather_prefix=config.weather_weighted_feature_prefix,
+        )
+    target = actual[["load_actual"]].rename(columns={"load_actual": "Load_Actual_MW"})
+    dataset = features.join(target, how="inner").sort_index()
+    dataset.index.name = "timestamp"
+    return dataset
+
+
+def _feature_columns(dataset: pd.DataFrame) -> list[str]:
+    return [
+        column
+        for column in dataset.select_dtypes(include="number").columns
+        if column != "Load_Actual_MW"
+    ]
+
+
+def _make_model(config: LoadForecastModelConfig):
+    if config.model_type == "hist_gradient_boosting":
+        return HistGradientBoostingRegressor(
+            loss="squared_error",
+            max_iter=config.hgb_max_iter,
+            learning_rate=config.hgb_learning_rate,
+            max_leaf_nodes=config.hgb_max_leaf_nodes,
+            l2_regularization=config.hgb_l2_regularization,
+            random_state=config.random_state,
+        )
+    if config.model_type == "ridge":
+        return make_pipeline(
+            SimpleImputer(strategy="median"),
+            StandardScaler(),
+            Ridge(alpha=config.ridge_alpha),
+        )
+    if config.model_type == "lightgbm":
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError as exc:
+            raise ImportError("model_type='lightgbm' requires the optional `lightgbm` package.") from exc
+
+        return LGBMRegressor(
+            objective="regression",
+            n_estimators=config.lgbm_n_estimators,
+            learning_rate=config.lgbm_learning_rate,
+            num_leaves=config.lgbm_num_leaves,
+            min_child_samples=config.lgbm_min_child_samples,
+            subsample=config.lgbm_subsample,
+            colsample_bytree=config.lgbm_colsample_bytree,
+            reg_lambda=config.lgbm_reg_lambda,
+            random_state=config.random_state,
+            n_jobs=-1,
+            verbosity=-1,
+        )
+    raise ValueError(f"Unsupported load forecast model_type: {config.model_type!r}")
+
+
+def _select_features(X_train: pd.DataFrame, y_train: pd.Series, config: LoadForecastModelConfig) -> list[str]:
+    max_features = config.max_features
+    if max_features is None or max_features <= 0 or X_train.shape[1] <= max_features:
+        return list(X_train.columns)
+
+    scores = (
+        X_train.corrwith(y_train)
+        .abs()
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+        .sort_values(ascending=False)
+    )
+    selected = list(scores.head(max_features).index)
+    return selected or list(X_train.columns)
+
+
+def _prediction_upper_bound(y_train: pd.Series, config: LoadForecastModelConfig) -> float | None:
+    if not config.clip_predictions_to_training_target_range:
+        return None
+    valid = y_train.dropna()
+    if valid.empty:
+        return None
+    if config.prediction_upper_quantile >= 1.0:
+        return float(valid.max())
+    return float(valid.quantile(config.prediction_upper_quantile))
+
+
+def _model_target_series(dataset: pd.DataFrame, config: LoadForecastModelConfig) -> pd.Series:
+    if config.load_target_mode == "actual_load":
+        return dataset["Load_Actual_MW"]
+    if config.load_target_mode == "entsoe_residual":
+        if "Load_Benchmark_MW" not in dataset.columns:
+            raise ValueError("load_target_mode='entsoe_residual' requires Load_Benchmark_MW in the dataset.")
+        return dataset["Load_Actual_MW"] - dataset["Load_Benchmark_MW"]
+    raise ValueError(f"Unsupported load_target_mode: {config.load_target_mode!r}")
+
+
+def _finalise_model_predictions(
+    raw_predictions: np.ndarray,
+    dataset: pd.DataFrame,
+    test_mask: np.ndarray,
+    y_train_actual: pd.Series,
+    config: LoadForecastModelConfig,
+) -> np.ndarray:
+    if config.load_target_mode == "entsoe_residual":
+        benchmark = dataset.loc[test_mask, "Load_Benchmark_MW"].to_numpy(dtype=float)
+        predictions = benchmark + raw_predictions
+        upper_bound = _prediction_upper_bound(y_train_actual, config)
+    else:
+        predictions = raw_predictions
+        upper_bound = _prediction_upper_bound(y_train_actual, config)
+
+    return np.clip(predictions, 0.0, upper_bound)
+
+
+def _hour_block_pairs(boundaries: list[int]) -> list[tuple[int, int]]:
+    return [(int(start), int(end)) for start, end in zip(boundaries[:-1], boundaries[1:])]
+
+
+def rolling_load_forecast(
+    dataset: pd.DataFrame,
+    config: LoadForecastModelConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Train rolling direct load models and predict complete forecast days."""
+    features = _feature_columns(dataset)
+    if not features:
+        raise ValueError("No load forecast feature columns were built.")
+    if "Load_Actual_MW" not in dataset.columns:
+        raise ValueError("Dataset is missing target column 'Load_Actual_MW'.")
+
+    test_start = _as_local_day(config.test_start, config.target_tz)
+    test_end = _as_local_day(config.test_end, config.target_tz)
+    forecast_days = pd.date_range(start=test_start, end=test_end, freq="D", tz=config.target_tz)
+    min_train_rows = config.min_train_days * 96
+    model_target = _model_target_series(dataset, config)
+
+    forecast_blocks: list[pd.DataFrame] = []
+    runtime_rows: list[dict[str, Any]] = []
+    for day in forecast_days:
+        day_start = time.perf_counter()
+        train_start = day - pd.Timedelta(days=config.train_days_rolling)
+        train_end = day - pd.Timedelta(days=config.target_availability_lag_days) - pd.Timedelta(minutes=15)
+        test_end_ts = day + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+
+        train_mask = (dataset.index >= train_start) & (dataset.index <= train_end)
+        test_mask = (dataset.index >= day) & (dataset.index <= test_end_ts)
+        X_test = dataset.loc[test_mask, features]
+        if len(X_test) == 0:
+            continue
+
+        selected_feature_counts: list[int] = []
+        if config.model_granularity == "global":
+            X_train_all = dataset.loc[train_mask, features]
+            y_train_all = model_target.loc[train_mask]
+            y_train_actual_all = dataset.loc[train_mask, "Load_Actual_MW"]
+            valid_train = y_train_all.notna()
+            X_train = X_train_all.loc[valid_train]
+            y_train = y_train_all.loc[valid_train]
+            y_train_actual = y_train_actual_all.loc[valid_train]
+            if len(X_train) < min_train_rows:
+                continue
+
+            selected_features = _select_features(X_train, y_train, config)
+            model = _make_model(config)
+            model.fit(X_train[selected_features], y_train)
+
+            predictions = pd.Series(
+                _finalise_model_predictions(
+                    model.predict(X_test[selected_features]),
+                    dataset,
+                    test_mask,
+                    y_train_actual,
+                    config,
+                ),
+                index=X_test.index,
+                dtype=float,
+            )
+            train_rows = len(X_train)
+            selected_feature_counts.append(len(selected_features))
+            n_models = 1
+        elif config.model_granularity == "hour_block":
+            predictions = pd.Series(np.nan, index=X_test.index, dtype=float)
+            train_rows = 0
+            n_models = 0
+            for start_hour, end_hour in _hour_block_pairs(config.hour_block_boundaries):
+                block_train_mask = (
+                    train_mask
+                    & (dataset.index.hour >= start_hour)
+                    & (dataset.index.hour < end_hour)
+                )
+                block_test_mask = (
+                    test_mask
+                    & (dataset.index.hour >= start_hour)
+                    & (dataset.index.hour < end_hour)
+                )
+                if not block_test_mask.any():
+                    continue
+
+                X_train_all = dataset.loc[block_train_mask, features]
+                y_train_all = model_target.loc[block_train_mask]
+                y_train_actual_all = dataset.loc[block_train_mask, "Load_Actual_MW"]
+                valid_train = y_train_all.notna()
+                X_train = X_train_all.loc[valid_train]
+                y_train = y_train_all.loc[valid_train]
+                y_train_actual = y_train_actual_all.loc[valid_train]
+                block_min_train_rows = config.min_train_days * max(end_hour - start_hour, 1) * 4
+                if len(X_train) < block_min_train_rows:
+                    continue
+
+                X_test_block = dataset.loc[block_test_mask, features]
+                selected_features = _select_features(X_train, y_train, config)
+                model = _make_model(config)
+                model.fit(X_train[selected_features], y_train)
+
+                block_predictions = _finalise_model_predictions(
+                    model.predict(X_test_block[selected_features]),
+                    dataset,
+                    block_test_mask,
+                    y_train_actual,
+                    config,
+                )
+                predictions.loc[X_test_block.index] = block_predictions
+                train_rows += len(X_train)
+                selected_feature_counts.append(len(selected_features))
+                n_models += 1
+
+            if predictions.isna().any():
+                missing_hours = sorted(set(int(hour) for hour in predictions.index[predictions.isna()].hour))
+                raise ValueError(f"Hour-block load model did not produce predictions for hours: {missing_hours}")
+        else:
+            raise ValueError(f"Unsupported model_granularity: {config.model_granularity!r}")
+
+        day_forecast = pd.DataFrame(index=X_test.index)
+        day_forecast["Load_Model_MW"] = predictions.to_numpy(dtype=float)
+        if "Load_Benchmark_MW" in dataset.columns:
+            day_forecast["Load_Benchmark_MW"] = dataset.loc[test_mask, "Load_Benchmark_MW"]
+        day_forecast["Load_Actual_MW"] = dataset.loc[test_mask, "Load_Actual_MW"]
+        forecast_blocks.append(day_forecast)
+
+        runtime_rows.append(
+            {
+                "date": day,
+                "train_rows": train_rows,
+                "test_rows": len(X_test),
+                "n_features": len(features),
+                "n_selected_features": max(selected_feature_counts) if selected_feature_counts else 0,
+                "n_models": n_models,
+                "model_type": config.model_type,
+                "model_granularity": config.model_granularity,
+                "runtime_seconds": time.perf_counter() - day_start,
+            }
+        )
+        print(
+            f"  {day.date()}  {config.model_type}/{config.model_granularity}  "
+            f"{runtime_rows[-1]['runtime_seconds']:.1f}s"
+        )
+
+    if not forecast_blocks:
+        raise ValueError("No load forecasts were produced.")
+
+    forecast = pd.concat(forecast_blocks).sort_index()
+    forecast.index.name = "timestamp"
+    runtime = pd.DataFrame(runtime_rows)
+    return forecast, runtime
+
+
+def _bias_correction_group_values(index: pd.DatetimeIndex, group: str) -> pd.Series:
+    if group == "global":
+        values = np.zeros(len(index), dtype=int)
+    elif group == "hour":
+        values = index.hour
+    elif group == "mtu":
+        values = index.hour * 4 + index.minute // 15
+    else:
+        raise ValueError(f"Unsupported bias_correction_group: {group!r}")
+    return pd.Series(values, index=index)
+
+
+def apply_rolling_bias_correction(
+    forecast: pd.DataFrame,
+    config: LoadForecastModelConfig,
+    *,
+    pred_col: str = "Load_Model_MW",
+    true_col: str = "Load_Actual_MW",
+    output_col: str = "Load_Model_BiasCorrected_MW",
+) -> pd.DataFrame:
+    """Add an operational rolling-error bias-corrected prediction column."""
+    if not config.apply_rolling_bias_correction:
+        return forecast
+    if pred_col not in forecast.columns or true_col not in forecast.columns:
+        raise ValueError(f"Forecast must contain {pred_col!r} and {true_col!r} for bias correction.")
+
+    corrected = forecast.copy()
+    errors = corrected[pred_col] - corrected[true_col]
+    group_values = _bias_correction_group_values(corrected.index, config.bias_correction_group)
+    window = pd.Timedelta(days=config.bias_correction_window_days)
+    min_observations = config.bias_correction_min_observations
+
+    corrected_values = corrected[pred_col].astype(float).copy()
+    for day in pd.DatetimeIndex(corrected.index.normalize().unique()).sort_values():
+        cutoff = day - pd.Timedelta(days=config.target_availability_lag_days) - pd.Timedelta(minutes=15)
+        window_start = cutoff - window
+        day_mask = corrected.index.normalize() == day
+        history_mask = (corrected.index >= window_start) & (corrected.index <= cutoff) & errors.notna()
+        if not history_mask.any():
+            continue
+
+        history_errors = errors.loc[history_mask]
+        history_groups = group_values.loc[history_mask]
+        group_bias = history_errors.groupby(history_groups).agg(["mean", "count"])
+        global_bias = float(history_errors.mean()) if len(history_errors) >= min_observations else np.nan
+
+        group_bias_map = {
+            group: float(row["mean"])
+            for group, row in group_bias.iterrows()
+            if row["count"] >= min_observations
+        }
+        for position in np.flatnonzero(day_mask):
+            key = group_values.iloc[position]
+            if key in group_bias_map:
+                bias = group_bias_map[key]
+            elif np.isfinite(global_bias):
+                bias = global_bias
+            else:
+                continue
+            corrected_values.iloc[position] = corrected[pred_col].iloc[position] - bias
+
+    corrected[output_col] = corrected_values.clip(lower=0.0)
+    return corrected
+
+
+def _period_metrics(
+    forecast: pd.DataFrame,
+    *,
+    pred_col: str,
+    true_col: str,
+    period: str,
+) -> dict[str, Any]:
+    valid = forecast[[pred_col, true_col]].dropna()
+    errors = valid[pred_col] - valid[true_col]
+    mse = float((errors**2).mean())
+    rmse = float(np.sqrt(mse))
+    ss_res = float((errors**2).sum())
+    ss_tot = float(((valid[true_col] - valid[true_col].mean()) ** 2).sum())
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+    mean_actual = float(valid[true_col].mean()) if not valid.empty else np.nan
+    return {
+        "target": "Load",
+        "model": pred_col.removeprefix("Load_").removesuffix("_MW"),
+        "period": period,
+        "mae": float(errors.abs().mean()),
+        "mse": mse,
+        "rmse": rmse,
+        "r2": r2,
+        "nrmse_mean_load_pct": float(rmse / mean_actual * 100.0) if mean_actual > 0 else np.nan,
+        "bias": float(errors.mean()),
+        "mean_actual_mw": mean_actual,
+        "n_obs": int(len(valid)),
+    }
+
+
+def evaluate_load_forecast(
+    forecast: pd.DataFrame,
+    prediction_columns: list[str] | None = None,
+    true_col: str = "Load_Actual_MW",
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if forecast.empty:
+        return pd.DataFrame(rows)
+
+    if prediction_columns is None:
+        prediction_columns = [
+            column
+            for column in forecast.select_dtypes(include="number").columns
+            if column.startswith("Load_") and column.endswith("_MW") and column != true_col
+        ]
+    if not prediction_columns:
+        return pd.DataFrame(rows)
+
+    for pred_col in prediction_columns:
+        rows.append(_period_metrics(forecast, pred_col=pred_col, true_col=true_col, period="full"))
+
+    month_index = forecast.index.tz_localize(None).to_period("M")
+    for month, group in forecast.groupby(month_index):
+        for pred_col in prediction_columns:
+            rows.append(_period_metrics(group, pred_col=pred_col, true_col=true_col, period=str(month)))
+    return pd.DataFrame(rows)
+
+
+def _load_model_forecast_csv(path: Path, target_tz: str) -> pd.DataFrame:
+    frame = _load_timestamp_csv(path, target_tz)
+    required_columns = {"Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"}
+    missing = required_columns - set(frame.columns)
+    if missing:
+        raise ValueError(f"Load forecast file {path} is missing required columns: {sorted(missing)}")
+    return frame[list(required_columns)].sort_index()
+
+
+def build_rolling_load_residual_ensemble(
+    source_forecasts: dict[str, pd.DataFrame],
+    *,
+    train_days: int = 28,
+    min_train_days: int = 7,
+    target_availability_lag_days: int = 1,
+    weight_grid: list[float] | None = None,
+    shrink_grid: list[float] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Blend two residual-correction load forecasts using only past available errors."""
+    if len(source_forecasts) != 2:
+        raise ValueError("Rolling load residual ensemble currently expects exactly two source forecasts.")
+    if train_days < 1:
+        raise ValueError("train_days must be positive.")
+    if min_train_days < 1:
+        raise ValueError("min_train_days must be positive.")
+    if target_availability_lag_days < 0:
+        raise ValueError("target_availability_lag_days must be non-negative.")
+
+    weight_grid = weight_grid or [round(value, 2) for value in np.linspace(0.0, 1.0, 11)]
+    shrink_grid = shrink_grid or [0.75, 0.9, 1.0, 1.1]
+    source_names = list(source_forecasts)
+    joined_parts = []
+    for name, forecast in source_forecasts.items():
+        required_columns = {"Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"}
+        missing = required_columns - set(forecast.columns)
+        if missing:
+            raise ValueError(f"Source forecast {name!r} is missing required columns: {sorted(missing)}")
+        part = forecast[["Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"]].rename(
+            columns={
+                "Load_Model_MW": f"Load_Model_MW_{name}",
+                "Load_Benchmark_MW": f"Load_Benchmark_MW_{name}",
+                "Load_Actual_MW": f"Load_Actual_MW_{name}",
+            }
+        )
+        joined_parts.append(part)
+
+    joined = pd.concat(joined_parts, axis=1, join="inner").sort_index()
+    benchmark_cols = [f"Load_Benchmark_MW_{name}" for name in source_names]
+    actual_cols = [f"Load_Actual_MW_{name}" for name in source_names]
+    benchmark = joined[benchmark_cols[0]].copy()
+    actual = joined[actual_cols[0]].copy()
+    for column in benchmark_cols[1:]:
+        if not np.allclose(benchmark.to_numpy(dtype=float), joined[column].to_numpy(dtype=float), equal_nan=True):
+            raise ValueError("Source forecasts have different Load_Benchmark_MW values.")
+    for column in actual_cols[1:]:
+        if not np.allclose(actual.to_numpy(dtype=float), joined[column].to_numpy(dtype=float), equal_nan=True):
+            raise ValueError("Source forecasts have different Load_Actual_MW values.")
+
+    residual_columns = []
+    for name in source_names:
+        column = f"Load_Model_Residual_MW_{name}"
+        joined[column] = joined[f"Load_Model_MW_{name}"] - benchmark
+        residual_columns.append(column)
+
+    daily_index = joined.index.normalize()
+    forecast_parts: list[pd.DataFrame] = []
+    calibration_rows: list[dict[str, Any]] = []
+    fallback_weight = 0.5
+    fallback_shrink = 1.0
+
+    for day in pd.DatetimeIndex(daily_index.unique()).sort_values():
+        train_start = day - pd.Timedelta(days=train_days)
+        train_end = day - pd.Timedelta(days=target_availability_lag_days) - pd.Timedelta(minutes=15)
+        train_mask = (joined.index >= train_start) & (joined.index <= train_end)
+        test_mask = daily_index == day
+        train_days_available = joined.index[train_mask].normalize().nunique()
+
+        best_weight = fallback_weight
+        best_shrink = fallback_shrink
+        best_rmse = np.nan
+        if train_days_available >= min_train_days and train_mask.any():
+            y_train = actual.loc[train_mask].to_numpy(dtype=float)
+            benchmark_train = benchmark.loc[train_mask].to_numpy(dtype=float)
+            residual_train = joined.loc[train_mask, residual_columns].to_numpy(dtype=float)
+            for weight in weight_grid:
+                weights = np.array([float(weight), 1.0 - float(weight)], dtype=float)
+                blended_residual = residual_train @ weights
+                for shrink in shrink_grid:
+                    prediction = benchmark_train + float(shrink) * blended_residual
+                    errors = prediction - y_train
+                    rmse = float(np.sqrt(np.mean(errors**2)))
+                    if not np.isfinite(best_rmse) or rmse < best_rmse:
+                        best_rmse = rmse
+                        best_weight = float(weight)
+                        best_shrink = float(shrink)
+
+        residual_test = joined.loc[test_mask, residual_columns].to_numpy(dtype=float)
+        day_weights = np.array([best_weight, 1.0 - best_weight], dtype=float)
+        prediction = benchmark.loc[test_mask].to_numpy(dtype=float) + best_shrink * (residual_test @ day_weights)
+        day_forecast = pd.DataFrame(index=joined.index[test_mask])
+        day_forecast["Load_Model_MW"] = np.clip(prediction, 0.0, None)
+        day_forecast["Load_Benchmark_MW"] = benchmark.loc[test_mask]
+        day_forecast["Load_Actual_MW"] = actual.loc[test_mask]
+        for name in source_names:
+            day_forecast[f"Load_Source_{name}_MW"] = joined.loc[test_mask, f"Load_Model_MW_{name}"]
+        forecast_parts.append(day_forecast)
+        calibration_rows.append(
+            {
+                "forecast_day": day,
+                "train_days_available": int(train_days_available),
+                "train_rmse": best_rmse,
+                f"weight_{source_names[0]}": best_weight,
+                f"weight_{source_names[1]}": 1.0 - best_weight,
+                "residual_shrink": best_shrink,
+            }
+        )
+
+    forecast = pd.concat(forecast_parts).sort_index()
+    forecast.index.name = "timestamp"
+    calibration = pd.DataFrame(calibration_rows)
+    return forecast, calibration
+
+
+def build_entsoe_load_forecast_benchmark(
+    config: EntsoeLoadForecastBenchmarkConfig,
+) -> pd.DataFrame:
+    """Build a model-style forecast frame from ENTSO-E total load forecast data."""
+    actual = _load_or_fetch_actual_load(config)
+    forecast = _load_or_fetch_entsoe_load_forecast(config)
+
+    frame = forecast[["load_fc"]].rename(columns={"load_fc": "Load_Benchmark_MW"}).join(
+        actual[["load_actual"]].rename(columns={"load_actual": "Load_Actual_MW"}),
+        how="inner",
+    )
+    frame = frame.sort_index()
+    if config.test_start is not None or config.test_end is not None:
+        start = _as_local_day(config.test_start or frame.index.min(), config.target_tz)
+        end = _as_local_day(config.test_end or frame.index.max(), config.target_tz) + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+        frame = frame.loc[(frame.index >= start) & (frame.index <= end)]
+    frame.index.name = "timestamp"
+    return frame
+
+
+def run_entsoe_load_forecast_benchmark(
+    config: EntsoeLoadForecastBenchmarkConfig,
+    *,
+    save_outputs: bool = True,
+) -> dict[str, pd.DataFrame]:
+    load_dotenv(config.repo_root / ".env")
+    print("\n--- ENTSO-E Load Forecast Benchmark ---")
+    forecast = build_entsoe_load_forecast_benchmark(config)
+    metrics = evaluate_load_forecast(forecast, prediction_columns=["Load_Benchmark_MW"])
+    print(metrics.to_string(index=False))
+
+    if save_outputs:
+        config.export_dir.mkdir(parents=True, exist_ok=True)
+        forecast.to_csv(config.export_dir / "forecast.csv")
+        metrics.to_csv(config.export_dir / "metrics.csv", index=False)
+        with (config.export_dir / "config.json").open("w", encoding="utf-8") as handle:
+            json.dump(config.model_dump(mode="json"), handle, indent=2)
+        print(f"Saved ENTSO-E load forecast benchmark outputs -> {config.export_dir}")
+
+    return {
+        "forecast": forecast,
+        "metrics": metrics,
+    }
+
+
+def run_load_forecast_pipeline(
+    config: LoadForecastModelConfig,
+    *,
+    save_outputs: bool = True,
+) -> dict[str, pd.DataFrame]:
+    load_dotenv(config.repo_root / ".env")
+    print("\n--- Building Load Forecast Dataset ---")
+    dataset = build_load_forecast_dataset(config)
+    print(f"Dataset: {dataset.shape[0]:,} rows, {dataset.shape[1]:,} columns")
+
+    print("\n--- Rolling Direct Load Forecast ---")
+    forecast, runtime = rolling_load_forecast(dataset, config)
+    forecast = apply_rolling_bias_correction(forecast, config)
+    metrics = evaluate_load_forecast(forecast)
+    print("\n--- Load Forecast Metrics ---")
+    print(metrics.to_string(index=False))
+
+    if save_outputs:
+        config.export_dir.mkdir(parents=True, exist_ok=True)
+        forecast.to_csv(config.export_dir / "forecast.csv")
+        runtime.to_csv(config.export_dir / "runtime.csv", index=False)
+        metrics.to_csv(config.export_dir / "metrics.csv", index=False)
+        with (config.export_dir / "config.json").open("w", encoding="utf-8") as handle:
+            json.dump(config.model_dump(mode="json"), handle, indent=2)
+        print(f"Saved load forecast outputs -> {config.export_dir}")
+
+    return {
+        "dataset": dataset,
+        "forecast": forecast,
+        "runtime": runtime,
+        "metrics": metrics,
+    }
