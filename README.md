@@ -259,6 +259,17 @@ Because this model uses DWD ICON weather features, the VM must also have the req
 - `data/processed/icon_aggregated_c25_run06/`
 - `data/processed/load_forecast/weather_cluster_population_weights_c25.csv`
 
+If the LSDF ICON-D2 raw folder is mounted on the VM, use the combined weather+submission runner. The LSDF base must point to the directory that contains folders like `dwd_icon_daily_20260515`:
+
+```bash
+nano .env
+# ENERGY_ARENA_LOAD_CHALLENGE_ID=20
+# DWD_ICON_LSDF_BASE=/path/to/mounted/lsdf/icon_by_Max_Kleinebrahm
+```
+
+For a target day such as `2026-05-16`, the runner aggregates the DWD issue folder from `2026-05-15`, because the configured DWD folders map to the following forecast day after `2025-10-26`. It also catches up missing issue days between the latest processed folder and the target issue day.
+For example, if the latest ready processed folder is `dwd_icon_daily_20260512_06` and you request a forecast for `2026-05-26`, it aggregates all missing issue days `2026-05-13` through `2026-05-25` before fitting/submitting the model.
+
 Run a dry run first:
 
 ```bash
@@ -277,6 +288,29 @@ To submit manually with retry behavior:
 pixi run energy-arena-load-daily --retry-until 11:55 --retry-interval-minutes 5
 ```
 
+To aggregate missing DWD data first and then submit:
+
+```bash
+pixi run energy-arena-load-daily-with-weather --dry-run --forecast-date 2026-05-16
+pixi run energy-arena-load-daily-with-weather --retry-until 11:55 --retry-interval-minutes 5
+```
+
+To only aggregate the missing DWD weather and exit:
+
+```bash
+pixi run energy-arena-load-daily-with-weather --weather-only --forecast-date 2026-05-16
+```
+
+If LSDF is not mounted on the VM, run the DWD processing locally while connected to KIT VPN and sync the processed output instead:
+
+```bash
+rsync -av data/processed/icon_aggregated_c25_run06/ \
+  bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/data/processed/icon_aggregated_c25_run06/
+
+rsync -av data/processed/load_forecast/weather_cluster_population_weights_c25.csv \
+  bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/data/processed/load_forecast/
+```
+
 On the VM, create a second user-level timer:
 
 ```bash
@@ -287,7 +321,7 @@ Description=Daily Energy Arena load forecast submission
 [Service]
 Type=oneshot
 WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
-ExecStart=%h/.pixi/bin/pixi run energy-arena-load-daily --retry-until 11:55 --retry-interval-minutes 5
+ExecStart=%h/.pixi/bin/pixi run energy-arena-load-daily-with-weather --retry-until 11:55 --retry-interval-minutes 5
 EOF
 
 cat > ~/.config/systemd/user/energy-arena-load-daily.timer <<'EOF'

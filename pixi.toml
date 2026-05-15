@@ -10,6 +10,7 @@ platforms = ["osx-arm64", "linux-64"]
 default = ["package", "core"]
 core = ["package", "core"]
 lear = ["package", "lear"]
+ops = ["package", "core", "lear"]
 sqra = ["package", "sqra"]
 tabpfn = ["package", "tabpfn"]
 dev = ["package", "core", "dev"]
@@ -123,4 +124,5 @@ tabpfn-local = { cmd = "da-price-forecast --config configs/tabpfn_local.yaml", d
 energy-arena-point = { cmd = "da-price-forecast --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
 energy-arena-daily = { cmd = "da-price-energy-arena-daily", default-environment = "lear" }
 energy-arena-load-daily = { cmd = "da-price-energy-arena-load-daily", default-environment = "lear" }
+energy-arena-load-daily-with-weather = { cmd = "da-price-energy-arena-load-daily-with-weather", default-environment = "ops" }
 test = { cmd = "pytest", default-environment = "dev" }

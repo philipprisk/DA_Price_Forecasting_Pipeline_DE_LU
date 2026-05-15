@@ -13,6 +13,13 @@ from da_price_forecasting.scripts.energy_arena_load_daily import (
     build_load_submission_payload,
     dated_load_work_paths,
 )
+from da_price_forecasting.scripts.energy_arena_load_daily_with_weather import (
+    dwd_issue_day_for_forecast,
+    ensure_dwd_weather_for_forecast,
+    missing_dwd_issue_days_to_process,
+    processed_weather_folder,
+    processed_weather_folder_is_ready,
+)
 
 
 def test_load_daily_payload_uses_load_forecast_source() -> None:
@@ -154,3 +161,109 @@ def test_load_energy_arena_source_accepts_runner_config_path(monkeypatch, tmp_pa
     assert len(result.forecast) == 96
     assert captured["config"].icon_dir == tmp_path / "icon_aggregated_c25_run06"
     assert captured["config"].export_dir == forecast_dir
+
+
+def test_dwd_issue_day_for_forecast_uses_previous_issue_day_after_offset() -> None:
+    assert dwd_issue_day_for_forecast(date(2026, 5, 16), date(2025, 10, 26)) == date(2026, 5, 15)
+    assert dwd_issue_day_for_forecast(date(2025, 10, 25), date(2025, 10, 26)) == date(2025, 10, 25)
+
+
+def test_processed_weather_folder_ready_requires_csv(tmp_path: Path) -> None:
+    folder = processed_weather_folder(tmp_path, date(2026, 5, 15), "06")
+    folder.mkdir()
+
+    assert folder == tmp_path / "dwd_icon_daily_20260515_06"
+    assert not processed_weather_folder_is_ready(folder)
+
+    (folder / "t2m_K_2026051506_raw.csv").write_text("timestamp,cluster_0\n", encoding="utf-8")
+    assert processed_weather_folder_is_ready(folder)
+
+
+def test_missing_dwd_issue_days_catches_up_from_latest_ready_folder(tmp_path: Path) -> None:
+    ready_12 = processed_weather_folder(tmp_path, date(2026, 5, 12), "06")
+    ready_12.mkdir()
+    (ready_12 / "t2m_K_2026051206_raw.csv").write_text("timestamp,cluster_0\n", encoding="utf-8")
+
+    empty_13 = processed_weather_folder(tmp_path, date(2026, 5, 13), "06")
+    empty_13.mkdir()
+
+    assert missing_dwd_issue_days_to_process(
+        icon_dir=tmp_path,
+        run_hour="06",
+        target_issue_day=date(2026, 5, 25),
+    ) == [date(2026, 5, day) for day in range(13, 26)]
+
+
+def test_weather_aggregation_processes_each_missing_issue_day(monkeypatch, tmp_path: Path) -> None:
+    from da_price_forecasting.config import LoadForecastModelConfig
+    from da_price_forecasting.preprocessing import icon_d2_aggregation
+
+    lsdf_base = tmp_path / "lsdf"
+    lsdf_base.mkdir()
+    for day in range(13, 26):
+        (lsdf_base / f"dwd_icon_daily_202605{day:02d}").mkdir()
+
+    ready_12 = processed_weather_folder(tmp_path / "icon_aggregated_c25_run06", date(2026, 5, 12), "06")
+    ready_12.mkdir(parents=True)
+    (ready_12 / "t2m_K_2026051206_raw.csv").write_text("timestamp,cluster_0\n", encoding="utf-8")
+
+    processed_days = []
+
+    def fake_run_aggregation(config):
+        day = date.fromisoformat(f"{config.only_day[:4]}-{config.only_day[4:6]}-{config.only_day[6:]}")
+        processed_days.append(day)
+        output = processed_weather_folder(config.output_parent, day, config.only_run_hour)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / f"t2m_K_{config.only_day}{config.only_run_hour}_raw.csv").write_text(
+            "timestamp,cluster_0\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(icon_d2_aggregation, "run_aggregation", fake_run_aggregation)
+
+    config = LoadForecastModelConfig(
+        repo_root=tmp_path,
+        actual_load_file=tmp_path / "actual_load.csv",
+        entsoe_load_forecast_file=tmp_path / "entsoe_load_forecast.csv",
+        icon_dir=tmp_path / "icon_aggregated_c25_run06",
+        export_dir=tmp_path / "export",
+        include_weather_features=True,
+        include_holiday_features=False,
+        required_run="06",
+        dwd_folder_offset_date=date(2025, 10, 26),
+    )
+
+    ensure_dwd_weather_for_forecast(
+        model_config=config,
+        forecast_date=date(2026, 5, 26),
+        lsdf_base=lsdf_base,
+    )
+
+    assert processed_days == [date(2026, 5, day) for day in range(13, 26)]
+
+
+def test_weather_aggregation_requires_reachable_lsdf(tmp_path: Path) -> None:
+    from da_price_forecasting.config import LoadForecastModelConfig
+
+    config = LoadForecastModelConfig(
+        repo_root=tmp_path,
+        actual_load_file=tmp_path / "actual_load.csv",
+        entsoe_load_forecast_file=tmp_path / "entsoe_load_forecast.csv",
+        icon_dir=tmp_path / "icon_aggregated_c25_run06",
+        export_dir=tmp_path / "export",
+        include_weather_features=True,
+        include_holiday_features=False,
+        required_run="06",
+    )
+
+    try:
+        ensure_dwd_weather_for_forecast(
+            model_config=config,
+            forecast_date=date(2026, 5, 16),
+            lsdf_base=None,
+            lsdf_base_env="MISSING_DWD_ICON_LSDF_BASE",
+        )
+    except ValueError as exc:
+        assert "MISSING_DWD_ICON_LSDF_BASE" in str(exc)
+    else:
+        raise AssertionError("Expected missing LSDF base to fail.")
