@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 from ..config import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
 from ..data.entsoe import fetch_actual_load, fetch_load_forecast
-from ..data.weather import load_dwd
+from ..data.weather import load_dwd, load_open_meteo
 
 
 def _as_local_day(value: Any, target_tz: str) -> pd.Timestamp:
@@ -42,22 +42,114 @@ def _save_timestamp_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path)
 
 
-def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
-    if config.actual_load_file.exists():
-        return _load_timestamp_csv(config.actual_load_file, config.target_tz)
-
-    start = _as_local_day(config.entsoe_start_date, config.target_tz)
-    end = _as_local_day(config.entsoe_end_date, config.target_tz)
-    df = fetch_actual_load(
-        start_day=start,
-        end_day=end,
-        country_code=config.country_code_entsoe,
-        api_key_env=config.entsoe_api_key_env,
-        target_tz=config.target_tz,
-        chunk_days=config.chunk_days,
+def _calendar_window(
+    config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    return (
+        _as_local_day(config.entsoe_start_date, config.target_tz),
+        _as_local_day(config.entsoe_end_date, config.target_tz),
     )
-    _save_timestamp_csv(df, config.actual_load_file)
+
+
+def _latest_operational_actual_day(target_tz: str) -> pd.Timestamp:
+    return pd.Timestamp.now(tz=target_tz).normalize() - pd.Timedelta(days=1)
+
+
+def _actual_load_fetch_window(
+    config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start, end = _calendar_window(config)
+    if isinstance(config, LoadForecastModelConfig):
+        end = min(end, _latest_operational_actual_day(config.target_tz))
+    return start, end
+
+
+def _restrict_timestamp_window(
+    df: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    target_tz: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    start_cut = start.tz_convert(target_tz).normalize()
+    end_cut = end.tz_convert(target_tz).normalize() + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    return df.loc[start_cut:end_cut]
+
+
+def _combine_timestamp_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    non_empty_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty_frames:
+        return pd.DataFrame()
+    df = pd.concat(non_empty_frames).sort_index()
+    df = df.loc[~df.index.duplicated(keep="last")]
+    df.index.name = "timestamp"
     return df
+
+
+def _load_or_fetch_windowed_cache(
+    *,
+    path: Path,
+    target_tz: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    fetch_window,
+    label: str,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    fetched_new_data = False
+
+    if path.exists():
+        cached = _load_timestamp_csv(path, target_tz)
+        if not cached.empty:
+            frames.append(cached)
+            cached_days = pd.DatetimeIndex(cached.index).tz_convert(target_tz).normalize()
+            cached_start = cached_days.min()
+            cached_end = cached_days.max()
+            missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+            if start < cached_start:
+                missing_ranges.append((start, cached_start - pd.Timedelta(days=1)))
+            if end > cached_end:
+                missing_ranges.append((cached_end + pd.Timedelta(days=1), end))
+        else:
+            missing_ranges = [(start, end)]
+    else:
+        missing_ranges = [(start, end)]
+
+    for fetch_start, fetch_end in missing_ranges:
+        if fetch_start > fetch_end:
+            continue
+        fetched = fetch_window(fetch_start, fetch_end)
+        if not fetched.empty:
+            frames.append(fetched)
+            fetched_new_data = True
+
+    if not frames:
+        raise ValueError(f"No {label} data available for {start.date()}..{end.date()}.")
+
+    df = _combine_timestamp_frames(frames)
+    if fetched_new_data or not path.exists():
+        _save_timestamp_csv(df, path)
+    return _restrict_timestamp_window(df, start, end, target_tz)
+
+
+def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
+    start, end = _actual_load_fetch_window(config)
+    return _load_or_fetch_windowed_cache(
+        path=config.actual_load_file,
+        target_tz=config.target_tz,
+        start=start,
+        end=end,
+        label="actual load",
+        fetch_window=lambda fetch_start, fetch_end: fetch_actual_load(
+            start_day=fetch_start,
+            end_day=fetch_end,
+            country_code=config.country_code_entsoe,
+            api_key_env=config.entsoe_api_key_env,
+            target_tz=config.target_tz,
+            chunk_days=config.chunk_days,
+        ),
+    )
 
 
 def _load_or_fetch_entsoe_load_forecast(config: EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
@@ -72,34 +164,35 @@ def _load_or_fetch_load_forecast_to_file(
     config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig,
     forecast_file: Path,
 ) -> pd.DataFrame:
-    if forecast_file.exists():
-        return _load_timestamp_csv(forecast_file, config.target_tz)
+    start, end = _calendar_window(config)
 
-    start = _as_local_day(config.entsoe_start_date, config.target_tz)
-    end = _as_local_day(config.entsoe_end_date, config.target_tz)
-    frames = []
-    current_start = start
-    while current_start <= end:
-        current_end = min(current_start + pd.Timedelta(days=config.chunk_days - 1), end)
-        frames.append(
-            fetch_load_forecast(
-                start_day=current_start,
-                end_day=current_end,
-                country_code=config.country_code_entsoe,
-                api_key_env=config.entsoe_api_key_env,
-                target_tz=config.target_tz,
+    def fetch_window(fetch_start: pd.Timestamp, fetch_end: pd.Timestamp) -> pd.DataFrame:
+        frames = []
+        current_start = fetch_start
+        while current_start <= fetch_end:
+            current_end = min(current_start + pd.Timedelta(days=config.chunk_days - 1), fetch_end)
+            frames.append(
+                fetch_load_forecast(
+                    start_day=current_start,
+                    end_day=current_end,
+                    country_code=config.country_code_entsoe,
+                    api_key_env=config.entsoe_api_key_env,
+                    target_tz=config.target_tz,
+                )
             )
-        )
-        current_start = current_end + pd.Timedelta(days=1)
+            current_start = current_end + pd.Timedelta(days=1)
+        if not frames:
+            return pd.DataFrame()
+        return _combine_timestamp_frames(frames)
 
-    if not frames:
-        raise ValueError("No ENTSO-E load forecast data returned.")
-
-    df = pd.concat(frames).sort_index()
-    df = df.loc[~df.index.duplicated(keep="last")]
-    df.index.name = "timestamp"
-    _save_timestamp_csv(df, forecast_file)
-    return df
+    return _load_or_fetch_windowed_cache(
+        path=forecast_file,
+        target_tz=config.target_tz,
+        start=start,
+        end=end,
+        label="ENTSO-E load forecast",
+        fetch_window=fetch_window,
+    )
 
 
 def _build_calendar_features(
@@ -744,7 +837,28 @@ def _temperature_threshold_label(value: float) -> str:
     return f"{numeric:g}".replace("-", "m").replace(".", "p")
 
 
+def _add_temperature_weather_columns(
+    data: dict[str, np.ndarray],
+    *,
+    cluster: str,
+    temp_k: np.ndarray,
+    hdd_thresholds: list[float],
+    cdd_thresholds: list[float],
+) -> None:
+    temp_c = temp_k.astype(float) - 273.15
+    data[f"weather_t2m_C_cluster_{cluster}"] = temp_c
+    for threshold in hdd_thresholds:
+        label = _temperature_threshold_label(threshold)
+        data[f"weather_hdd{label}_cluster_{cluster}"] = np.clip(float(threshold) - temp_c, 0.0, None)
+    for threshold in cdd_thresholds:
+        label = _temperature_threshold_label(threshold)
+        data[f"weather_cdd{label}_cluster_{cluster}"] = np.clip(temp_c - float(threshold), 0.0, None)
+
+
 def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFrame:
+    if config.weather_source == "open_meteo":
+        return _build_load_open_meteo_weather_features(config)
+
     df_hourly, df_qh = load_dwd(
         icon_dir=config.icon_dir,
         start_folder_date=config.start_folder_date,
@@ -759,14 +873,13 @@ def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFram
     hourly_data: dict[str, np.ndarray] = {}
     for column in sorted(col for col in df_hourly.columns if col.startswith("t2m_cluster_")):
         cluster = _cluster_id(column)
-        temp_c = df_hourly[column].to_numpy(dtype=float) - 273.15
-        hourly_data[f"weather_t2m_C_cluster_{cluster}"] = temp_c
-        for threshold in hdd_thresholds:
-            label = _temperature_threshold_label(threshold)
-            hourly_data[f"weather_hdd{label}_cluster_{cluster}"] = np.clip(float(threshold) - temp_c, 0.0, None)
-        for threshold in cdd_thresholds:
-            label = _temperature_threshold_label(threshold)
-            hourly_data[f"weather_cdd{label}_cluster_{cluster}"] = np.clip(temp_c - float(threshold), 0.0, None)
+        _add_temperature_weather_columns(
+            hourly_data,
+            cluster=cluster,
+            temp_k=df_hourly[column].to_numpy(dtype=float),
+            hdd_thresholds=hdd_thresholds,
+            cdd_thresholds=cdd_thresholds,
+        )
 
     for column in sorted(col for col in df_hourly.columns if col.startswith("td2m_cluster_")):
         cluster = _cluster_id(column)
@@ -815,6 +928,99 @@ def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFram
     )
     hourly_features = hourly_features.loc[~hourly_features.index.duplicated(keep="last")].reindex(full_index).ffill(limit=3)
     qh_features = qh_features.loc[~qh_features.index.duplicated(keep="last")].reindex(full_index)
+    features = pd.concat([hourly_features, qh_features], axis=1).sort_index()
+    features.index.name = "timestamp"
+    return features
+
+
+def _build_load_open_meteo_weather_features(config: LoadForecastModelConfig) -> pd.DataFrame:
+    weather = load_open_meteo(
+        cluster_file=config.open_meteo_cluster_file,
+        start_date=config.open_meteo_start_date,
+        end_date=config.open_meteo_end_date,
+        cache_file=config.open_meteo_weather_file,
+        base_url=config.open_meteo_base_url,
+        model=config.open_meteo_model,
+        hourly_variables=config.open_meteo_hourly_variables,
+        batch_size=config.open_meteo_batch_size,
+        cell_selection=config.open_meteo_cell_selection,
+        timeout_seconds=config.open_meteo_timeout_seconds,
+        target_tz=config.target_tz,
+        force_download=config.open_meteo_force_download,
+        point_selection=config.open_meteo_point_selection,
+        max_points_per_cluster=config.open_meteo_max_points_per_cluster,
+        api_mode=config.open_meteo_api_mode,
+        single_run_hour_utc=config.open_meteo_single_run_hour_utc,
+        single_run_forecast_days=config.open_meteo_single_run_forecast_days,
+        request_pause_seconds=config.open_meteo_request_pause_seconds,
+        retry_attempts=config.open_meteo_retry_attempts,
+        retry_backoff_seconds=config.open_meteo_retry_backoff_seconds,
+    )
+
+    hdd_thresholds = config.weather_hdd_thresholds if config.include_rich_temperature_features else [18.0]
+    cdd_thresholds = config.weather_cdd_thresholds if config.include_rich_temperature_features else [22.0]
+    hourly_data: dict[str, np.ndarray] = {}
+    for column in sorted(col for col in weather.columns if col.startswith("t2m_cluster_")):
+        cluster = _cluster_id(column)
+        _add_temperature_weather_columns(
+            hourly_data,
+            cluster=cluster,
+            temp_k=weather[column].to_numpy(dtype=float),
+            hdd_thresholds=hdd_thresholds,
+            cdd_thresholds=cdd_thresholds,
+        )
+
+    for column in sorted(col for col in weather.columns if col.startswith("td2m_cluster_")):
+        cluster = _cluster_id(column)
+        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = weather[column].to_numpy(dtype=float) - 273.15
+
+    for prefix, name in [
+        ("sp_cluster_", "weather_sp_Pa"),
+        ("tp_cluster_", "weather_precip"),
+        ("sde_cluster_", "weather_snow_depth"),
+        ("tcc_cluster_", "weather_cloud_cover"),
+    ]:
+        for column in sorted(col for col in weather.columns if col.startswith(prefix)):
+            hourly_data[f"{name}_cluster_{_cluster_id(column)}"] = weather[column].to_numpy(dtype=float)
+
+    for u_prefix, v_prefix, output_name in [
+        ("u10_cluster_", "v10_cluster_", "weather_wind_speed_10m"),
+        ("u100_cluster_", "v100_cluster_", "weather_wind_speed_100m"),
+    ]:
+        for u_col in sorted(col for col in weather.columns if col.startswith(u_prefix)):
+            cluster = _cluster_id(u_col)
+            v_col = f"{v_prefix}{cluster}"
+            if v_col not in weather.columns:
+                continue
+            speed = np.sqrt(weather[u_col].to_numpy(dtype=float) ** 2 + weather[v_col].to_numpy(dtype=float) ** 2)
+            hourly_data[f"{output_name}_cluster_{cluster}"] = speed
+
+    qh_data: dict[str, np.ndarray] = {}
+    for global_col, direct_col, diffuse_col in [
+        ("ssrd_cluster_", "fdir_cluster_", None),
+    ]:
+        for column in sorted(col for col in weather.columns if col.startswith(global_col)):
+            cluster = _cluster_id(column)
+            qh_data[f"weather_solar_global_cluster_{cluster}"] = np.clip(weather[column].to_numpy(dtype=float), 0.0, None)
+            fdir_column = f"{direct_col}{cluster}"
+            if fdir_column in weather.columns:
+                direct = np.clip(weather[fdir_column].to_numpy(dtype=float), 0.0, None)
+                qh_data[f"weather_solar_direct_cluster_{cluster}"] = direct
+                qh_data[f"weather_solar_diffuse_cluster_{cluster}"] = (
+                    qh_data[f"weather_solar_global_cluster_{cluster}"] - direct
+                )
+
+    hourly_features = pd.DataFrame(hourly_data, index=weather.index)
+    qh_features = pd.DataFrame(qh_data, index=weather.index)
+    full_index = pd.date_range(
+        start=weather.index.min(),
+        end=weather.index.max(),
+        freq="15min",
+        tz=config.target_tz,
+        name="timestamp",
+    )
+    hourly_features = hourly_features.loc[~hourly_features.index.duplicated(keep="last")].reindex(full_index).ffill(limit=3)
+    qh_features = qh_features.loc[~qh_features.index.duplicated(keep="last")].reindex(full_index).ffill(limit=3)
     features = pd.concat([hourly_features, qh_features], axis=1).sort_index()
     features.index.name = "timestamp"
     return features
@@ -926,7 +1132,7 @@ def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame
             weighted_weather_prefix=config.weather_weighted_feature_prefix,
         )
     target = actual[["load_actual"]].rename(columns={"load_actual": "Load_Actual_MW"})
-    dataset = features.join(target, how="inner").sort_index()
+    dataset = features.join(target, how="left").sort_index()
     dataset.index.name = "timestamp"
     return dataset
 

@@ -8,7 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from ...config import EnergyArenaSubmissionConfig, LearOperationalConfig, SqraConfig, TabpfnLocalConfig, TabpfnTsConfig
+from ...config import (
+    EnergyArenaSubmissionConfig,
+    LearOperationalConfig,
+    LoadForecastModelConfig,
+    SqraConfig,
+    TabpfnLocalConfig,
+    TabpfnTsConfig,
+)
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
@@ -174,6 +181,19 @@ def build_model_metadata(model_config: Any | None) -> dict[str, Any]:
             "use_load_forecast": model_config.use_load_forecast,
             "price_lag_days": model_config.price_lag_days,
             "add_calendar_features": model_config.add_calendar_features,
+        }
+
+    if isinstance(model_config, LoadForecastModelConfig):
+        return {
+            "model_type": "load_forecast_model",
+            "load_target_mode": model_config.load_target_mode,
+            "forecast_model_type": model_config.model_type,
+            "model_granularity": model_config.model_granularity,
+            "train_days_rolling": model_config.train_days_rolling,
+            "include_entsoe_forecast_features": model_config.include_entsoe_forecast_features,
+            "include_weather_features": model_config.include_weather_features,
+            "icon_dir": str(model_config.icon_dir),
+            "required_run": model_config.required_run,
         }
 
     return {}

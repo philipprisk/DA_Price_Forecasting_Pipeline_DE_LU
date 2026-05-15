@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 da-price-forecast = "da_price_forecasting.scripts.run:main"
 da-price-energy-arena-daily = "da_price_forecasting.scripts.energy_arena_daily:main"
+da-price-energy-arena-load-daily = "da_price_forecasting.scripts.energy_arena_load_daily:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

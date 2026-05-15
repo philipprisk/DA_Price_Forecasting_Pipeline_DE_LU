@@ -237,6 +237,83 @@ Inspect logs with:
 journalctl --user -u energy-arena-daily.service -f
 ```
 
+### Daily Energy Arena load automation
+
+The load challenge uses the same VM pattern, but the source is a load model config instead of the EXAA-only price/SQRA pair. The default daily load runner uses:
+
+```text
+configs/load_forecast_hybrid_entsoe_residual_c25_run06_rich_temp_daily_weather_hgb_smooth_febapr.yaml
+```
+
+Add the load challenge id to the VM-local `.env`:
+
+```bash
+nano .env
+# ENERGY_ARENA_LOAD_CHALLENGE_ID=<load challenge id>
+```
+
+The runner targets tomorrow in `Europe/Berlin`, rewrites the load model evaluation window to that one day, extends the cached ENTSO-E actual/load-forecast CSVs when needed, and submits the `Load_Model_MW` column as a point forecast.
+
+Because this model uses DWD ICON weather features, the VM must also have the required processed weather data before the submission run:
+
+- `data/processed/icon_aggregated_c25_run06/`
+- `data/processed/load_forecast/weather_cluster_population_weights_c25.csv`
+
+Run a dry run first:
+
+```bash
+pixi run energy-arena-load-daily --dry-run
+```
+
+To test a specific target day:
+
+```bash
+pixi run energy-arena-load-daily --dry-run --forecast-date 2026-05-16
+```
+
+To submit manually with retry behavior:
+
+```bash
+pixi run energy-arena-load-daily --retry-until 11:55 --retry-interval-minutes 5
+```
+
+On the VM, create a second user-level timer:
+
+```bash
+cat > ~/.config/systemd/user/energy-arena-load-daily.service <<'EOF'
+[Unit]
+Description=Daily Energy Arena load forecast submission
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
+ExecStart=%h/.pixi/bin/pixi run energy-arena-load-daily --retry-until 11:55 --retry-interval-minutes 5
+EOF
+
+cat > ~/.config/systemd/user/energy-arena-load-daily.timer <<'EOF'
+[Unit]
+Description=Run Energy Arena load submission daily at 11:30 Europe/Berlin
+
+[Timer]
+OnCalendar=*-*-* 11:30:00
+Persistent=true
+Unit=energy-arena-load-daily.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now energy-arena-load-daily.timer
+systemctl --user list-timers energy-arena-load-daily.timer
+```
+
+Inspect load logs with:
+
+```bash
+journalctl --user -u energy-arena-load-daily.service -f
+```
+
 For data/results transfer, use `rsync` from your local machine:
 
 ```bash
@@ -303,6 +380,7 @@ pixi run sqra
 pixi run tabpfn-ts
 pixi run tabpfn-local
 pixi run energy-arena-point
+pixi run energy-arena-load-daily --dry-run
 pixi run visualization-report
 pixi run evaluation
 ```
@@ -416,7 +494,7 @@ The Energy Arena integration is config-driven and can submit dense `values` payl
 Current scope:
 
 - Generates or loads a forecast for one target day without notebook code
-- Supports LEAR operational sources, SQRA sources, TabPFN-TS sources, local TabPFN sources, and already-saved forecast CSVs
+- Supports LEAR operational sources, SQRA sources, TabPFN-TS sources, local TabPFN sources, load forecast model sources, and already-saved forecast CSVs
 - Supports point payloads where each `values` entry is a scalar
 - Supports quantile payloads where each `values` entry is a fixed quantile vector
 - Exports the exact `test_payload.json`-style payload and forecast artifacts
@@ -456,6 +534,7 @@ Important:
 - `source.kind = "sqra"` runs an SQRA config and can submit either quantile columns or the median column
 - `source.kind = "tabpfn_ts"` runs a TabPFN-TS config and can submit either `y_pred` or quantile columns
 - `source.kind = "tabpfn_local"` runs a local TabPFN config and can submit either `y_pred` or quantile columns
+- `source.kind = "load_forecast_model"` runs a load forecasting config and submits `Load_Model_MW` by default
 - `source.kind = "forecast_file"` submits an existing CSV artifact with a timestamp index
 - Non-EXAA-only LEAR direct submission requires target-day weather and load forecast features to be available
 - The dense payload template matches the current `challenge_id` / `target_start` / `values` example format for both point and quantile challenges

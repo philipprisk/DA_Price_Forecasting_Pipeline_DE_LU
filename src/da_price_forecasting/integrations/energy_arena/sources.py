@@ -11,6 +11,9 @@ from ...config import (
     ForecastFileEnergyArenaSource,
     LearOperationalConfig,
     LearOperationalEnergyArenaSource,
+    LoadForecastModelConfig,
+    LoadForecastModelEnergyArenaSource,
+    RunConfig,
     SqraConfig,
     SqraEnergyArenaSource,
     TabpfnLocalConfig,
@@ -18,6 +21,7 @@ from ...config import (
     TabpfnTsConfig,
     TabpfnTsEnergyArenaSource,
     load_config,
+    load_config_payload,
     validate_config_payload,
 )
 
@@ -45,7 +49,13 @@ def _load_embedded_or_path_config(
     submission_config: EnergyArenaSubmissionConfig,
 ) -> Any:
     if source.config_path is not None:
-        return load_config(source.config_path, model_cls)
+        payload = load_config_payload(source.config_path)
+        if payload.get("kind") is not None:
+            run_config = validate_config_payload(payload, RunConfig, repo_root=submission_config.repo_root)
+            if run_config.config_path is not None:
+                return load_config(run_config.config_path, model_cls)
+            return validate_config_payload(run_config.config, model_cls, repo_root=run_config.repo_root)
+        return validate_config_payload(payload, model_cls, repo_root=submission_config.repo_root)
     return validate_config_payload(source.config or {}, model_cls, repo_root=submission_config.repo_root)
 
 
@@ -73,6 +83,10 @@ def infer_source_name(submission_config: EnergyArenaSubmissionConfig) -> str:
     if isinstance(source, TabpfnLocalEnergyArenaSource):
         config = _load_embedded_or_path_config(source, TabpfnLocalConfig, submission_config)
         return config.resolved_experiment_name
+
+    if isinstance(source, LoadForecastModelEnergyArenaSource):
+        config = _load_embedded_or_path_config(source, LoadForecastModelConfig, submission_config)
+        return config.export_dir.name
 
     if isinstance(source, ForecastFileEnergyArenaSource):
         return source.name or source.path.parent.name or source.path.stem
@@ -246,6 +260,39 @@ def _run_or_load_tabpfn_local(
     )
 
 
+def _run_or_load_load_forecast_model(
+    source: LoadForecastModelEnergyArenaSource,
+    submission_config: EnergyArenaSubmissionConfig,
+    forecast_dir: Path,
+) -> EnergyArenaForecastResult:
+    from ...pipelines.load_forecast import run_load_forecast_pipeline
+
+    config = _load_embedded_or_path_config(source, LoadForecastModelConfig, submission_config)
+    source_name = config.export_dir.name
+    if source.run_before_submit:
+        forecast_day = _forecast_day(submission_config)
+        config.test_start = forecast_day.date()
+        config.test_end = forecast_day.date()
+        config.entsoe_end_date = forecast_day.date()
+        config.export_dir = forecast_dir
+        result = run_load_forecast_pipeline(config=config, save_outputs=True)
+        forecast = result["forecast"]
+    else:
+        forecast = load_forecast_frame(config.export_dir / "forecast.csv", config.target_tz)
+
+    return EnergyArenaForecastResult(
+        forecast=forecast,
+        source_name=source_name,
+        model_config=config,
+        metadata={
+            "source_kind": source.kind,
+            "run_before_submit": source.run_before_submit,
+        }
+        | _source_config_metadata(source),
+        default_value_column=source.value_column or "Load_Model_MW",
+    )
+
+
 def load_or_run_forecast_source(
     submission_config: EnergyArenaSubmissionConfig,
     forecast_dir: Path,
@@ -266,5 +313,8 @@ def load_or_run_forecast_source(
 
     if isinstance(source, TabpfnLocalEnergyArenaSource):
         return _run_or_load_tabpfn_local(source, submission_config, forecast_dir)
+
+    if isinstance(source, LoadForecastModelEnergyArenaSource):
+        return _run_or_load_load_forecast_model(source, submission_config, forecast_dir)
 
     raise ValueError(f"Unsupported Energy Arena source: {source!r}")

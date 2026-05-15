@@ -44,6 +44,23 @@ def test_build_load_forecast_dataset_adds_calendar_lags_and_weather(monkeypatch,
     assert dataset.loc[timestamp, "Load_Actual_MW_lag_d2"] == actual.loc[timestamp - pd.Timedelta(days=2), "load_actual"]
 
 
+def test_build_load_forecast_dataset_keeps_future_feature_rows_without_actuals(monkeypatch, tmp_path: Path) -> None:
+    actual_index = pd.date_range("2026-01-01T00:00:00+01:00", periods=3 * 96, freq="15min")
+    weather_index = pd.date_range("2026-01-01T00:00:00+01:00", periods=4 * 96, freq="15min")
+    actual = pd.DataFrame({"load_actual": 50_000.0 + np.arange(len(actual_index), dtype=float)}, index=actual_index)
+    weather = pd.DataFrame({"weather_t2m_C_cluster_0": np.linspace(0.0, 5.0, len(weather_index))}, index=weather_index)
+
+    monkeypatch.setattr(lf, "_load_or_fetch_actual_load", lambda config: actual)
+    monkeypatch.setattr(lf, "_build_load_weather_features", lambda config: weather)
+
+    dataset = lf.build_load_forecast_dataset(_config(tmp_path))
+    future_timestamp = pd.Timestamp("2026-01-04T12:00:00+01:00")
+
+    assert future_timestamp in dataset.index
+    assert np.isnan(dataset.loc[future_timestamp, "Load_Actual_MW"])
+    assert np.isfinite(dataset.loc[future_timestamp, "weather_t2m_C_cluster_0"])
+
+
 def test_calendar_features_include_bridge_days_and_extra_harmonics() -> None:
     index = pd.date_range("2026-05-15T00:00:00+02:00", periods=1, freq="15min")
 
@@ -118,6 +135,41 @@ def test_rich_temperature_weather_features_add_configured_thresholds(monkeypatch
     assert "weather_cdd24_cluster_0" in features.columns
     assert features.loc[hourly_index[0], "weather_hdd12_cluster_0"] == 2.0
     assert features.loc[hourly_index[1], "weather_cdd24_cluster_0"] == 1.0
+
+
+def test_open_meteo_weather_features_use_existing_loader(monkeypatch, tmp_path: Path) -> None:
+    weather_index = pd.date_range("2026-01-01T00:00:00", periods=2, freq="h", tz="Europe/Berlin")
+    weather = pd.DataFrame(
+        {
+            "t2m_cluster_0": [283.15, 298.15],
+            "td2m_cluster_0": [280.15, 290.15],
+            "u10_cluster_0": [3.0, 4.0],
+            "v10_cluster_0": [4.0, 3.0],
+            "ssrd_cluster_0": [0.0, 100.0],
+            "fdir_cluster_0": [0.0, 60.0],
+        },
+        index=weather_index,
+    )
+    monkeypatch.setattr(lf, "load_open_meteo", lambda **kwargs: weather)
+
+    features = lf._build_load_weather_features(
+        _config(
+            tmp_path,
+            weather_source="open_meteo",
+            open_meteo_cluster_file=tmp_path / "clusters.parquet",
+            open_meteo_weather_file=tmp_path / "open_meteo.csv",
+            include_rich_temperature_features=True,
+            weather_hdd_thresholds=[12, 18],
+            weather_cdd_thresholds=[20, 24],
+        )
+    )
+
+    assert "weather_hdd12_cluster_0" in features.columns
+    assert "weather_cdd24_cluster_0" in features.columns
+    assert "weather_wind_speed_10m_cluster_0" in features.columns
+    assert "weather_solar_global_cluster_0" in features.columns
+    assert np.isclose(features.loc[weather_index[0], "weather_wind_speed_10m_cluster_0"], 5.0)
+    assert features.loc[weather_index[1], "weather_solar_diffuse_cluster_0"] == 40.0
 
 
 def test_weighted_weather_features_use_cluster_weights() -> None:
@@ -436,6 +488,29 @@ def test_rolling_load_forecast_outputs_complete_day(tmp_path: Path) -> None:
     assert forecast.columns.tolist() == ["Load_Model_MW", "Load_Actual_MW"]
     assert forecast["Load_Model_MW"].notna().all()
     assert runtime.loc[0, "train_rows"] >= 2 * 96
+
+
+def test_rolling_load_forecast_predicts_future_day_without_actual_target(tmp_path: Path) -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=20 * 96, freq="15min")
+    mtu = index.hour * 4 + index.minute // 15
+    load = 45_000.0 + 1_000.0 * np.sin(2 * np.pi * mtu / 96) + np.arange(len(index), dtype=float) * 0.5
+    dataset = pd.DataFrame(index=index)
+    dataset["feature_trend"] = np.arange(len(index), dtype=float)
+    dataset["feature_mtu_sin"] = np.sin(2 * np.pi * mtu / 96)
+    dataset["Load_Actual_MW"] = load
+    target_day = pd.Timestamp("2026-01-12T00:00:00+01:00")
+    dataset.loc[dataset.index.normalize() == target_day, "Load_Actual_MW"] = np.nan
+
+    config = _config(
+        tmp_path,
+        test_start=target_day.date(),
+        test_end=target_day.date(),
+    )
+    forecast, _ = lf.rolling_load_forecast(dataset, config)
+
+    assert len(forecast) == 96
+    assert forecast["Load_Model_MW"].notna().all()
+    assert forecast["Load_Actual_MW"].isna().all()
 
 
 def test_rolling_load_forecast_supports_hour_block_models(tmp_path: Path) -> None:

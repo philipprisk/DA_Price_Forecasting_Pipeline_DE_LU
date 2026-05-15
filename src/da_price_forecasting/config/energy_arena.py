@@ -82,12 +82,27 @@ class TabpfnLocalEnergyArenaSource(BaseModel):
         return self
 
 
+class LoadForecastModelEnergyArenaSource(BaseModel):
+    kind: Literal["load_forecast_model"] = "load_forecast_model"
+    config_path: Path | None = None
+    config: dict[str, Any] | None = None
+    run_before_submit: bool = True
+    value_column: str | None = None
+
+    @model_validator(mode="after")
+    def _require_config(self) -> "LoadForecastModelEnergyArenaSource":
+        if self.config_path is None and self.config is None:
+            raise ValueError("load_forecast_model source requires config_path or embedded config.")
+        return self
+
+
 EnergyArenaForecastSourceConfig = Annotated[
     LearOperationalEnergyArenaSource
     | SqraEnergyArenaSource
     | ForecastFileEnergyArenaSource
     | TabpfnTsEnergyArenaSource
-    | TabpfnLocalEnergyArenaSource,
+    | TabpfnLocalEnergyArenaSource
+    | LoadForecastModelEnergyArenaSource,
     Field(discriminator="kind"),
 ]
 
@@ -143,6 +158,8 @@ class EnergyArenaSubmissionConfig(RepoConfigModel):
         elif isinstance(self.source, TabpfnTsEnergyArenaSource) and self.source.config_path is not None:
             self.source.config_path = resolve_path(self.source.config_path, self.repo_root)
         elif isinstance(self.source, TabpfnLocalEnergyArenaSource) and self.source.config_path is not None:
+            self.source.config_path = resolve_path(self.source.config_path, self.repo_root)
+        elif isinstance(self.source, LoadForecastModelEnergyArenaSource) and self.source.config_path is not None:
             self.source.config_path = resolve_path(self.source.config_path, self.repo_root)
 
         if self.payload_template_path is not None:
