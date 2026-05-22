@@ -1,0 +1,75 @@
+kind: load_forecast_model
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+  entsoe_start_date: "2025-08-01"
+  entsoe_end_date: "2026-04-23"
+  actual_load_file: data/processed/load_forecast/actual_load.csv
+  entsoe_load_forecast_file: data/processed/load_forecast/entsoe_load_forecast.csv
+  icon_dir: data/processed/icon_aggregated_c25_run06
+  export_dir: results/load_forecast_results/hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr
+
+  load_target_mode: entsoe_residual
+  include_entsoe_forecast_features: true
+  include_calendar_features: true
+  include_holiday_features: true
+  include_bridge_day_features: true
+  include_actual_load_lag_features: true
+  include_partial_load_features: true
+  partial_load_reference_day: 1
+  partial_load_comparison_lag_days: 7
+  partial_load_morning_end_hour: 11
+  include_weather_features: true
+  include_weighted_weather_features: true
+  include_weighted_weather_daily_features: true
+  weighted_weather_daily_feature_bases: [t2m_C, hdd18, cdd22]
+  weighted_weather_daily_stats: [mean, min, max]
+  weighted_weather_daily_lag_days: [1, 7]
+  include_weather_time_interactions: true
+  weather_cluster_weight_file: data/processed/load_forecast/weather_cluster_population_weights_c25.csv
+  weather_cluster_id_column: cluster_id
+  weather_cluster_weight_column: weight
+  weather_weighted_feature_prefix: weather_weighted
+  weather_weighted_feature_bases: [t2m_C, hdd18, cdd22]
+  keep_weather_cluster_features: false
+  calendar_harmonics: 3
+  actual_load_lag_days: [2, 3, 7, 14, 21]
+  target_availability_lag_days: 1
+
+  start_folder_date: "2025-08-01"
+  required_run: "06"
+  dwd_folder_offset_date: "2025-10-26"
+  skip_dates:
+    - "2025-10-26"
+    - "2025-10-27"
+    - "2025-10-28"
+  dwd_icon_auto_update: true
+  dwd_icon_raw_dir: data/raw/dwd_icon_daily
+  dwd_icon_catch_up_missing_days: false
+  dwd_icon_aggregation_n_clusters: 25
+  dwd_icon_aggregation_shapefile_path: data/shapefile/ne_10m_admin_0_countries.shp
+  dwd_icon_download_variables:
+    - t_2m
+    - td_2m
+    - p
+    - u_10m
+    - v_10m
+    - vmax_10m
+    - aswdir_s
+    - aswdifd_s
+    - tot_prec
+    - h_snow
+    - snow_gsp
+
+  model_type: hist_gradient_boosting
+  train_days_rolling: 112
+  min_train_days: 30
+  test_start: "2026-02-01"
+  test_end: "2026-04-23"
+  hgb_max_iter: 600
+  hgb_learning_rate: 0.02
+  hgb_max_leaf_nodes: 15
+  hgb_l2_regularization: 0.3
+  random_state: 42
