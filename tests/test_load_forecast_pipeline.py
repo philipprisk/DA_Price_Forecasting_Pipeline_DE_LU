@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -135,6 +136,50 @@ def test_rich_temperature_weather_features_add_configured_thresholds(monkeypatch
     assert "weather_cdd24_cluster_0" in features.columns
     assert features.loc[hourly_index[0], "weather_hdd12_cluster_0"] == 2.0
     assert features.loc[hourly_index[1], "weather_cdd24_cluster_0"] == 1.0
+
+
+def test_dwd_weather_auto_update_runs_before_loading_archive(monkeypatch, tmp_path: Path) -> None:
+    from da_price_forecasting.preprocessing import dwd_icon_operational
+
+    hourly_index = pd.date_range("2026-05-16T00:00:00", periods=2, freq="h", tz="Europe/Berlin")
+    qh_index = pd.date_range("2026-05-16T00:00:00", periods=8, freq="15min", tz="Europe/Berlin")
+    df_hourly = pd.DataFrame({"t2m_cluster_0": [283.15, 284.15]}, index=hourly_index)
+    df_qh = pd.DataFrame({"ASWDIR_cluster_0": [1.0] * 8, "ASWDIFD_cluster_0": [2.0] * 8}, index=qh_index)
+    calls = {}
+
+    def fake_ensure_dwd_icon_weather(**kwargs):
+        calls.update(kwargs)
+        assert not calls.get("load_dwd_called", False)
+        return [date(2026, 5, 15)]
+
+    def fake_load_dwd(**kwargs):
+        calls["load_dwd_called"] = True
+        return df_hourly, df_qh
+
+    monkeypatch.setattr(dwd_icon_operational, "ensure_dwd_icon_weather", fake_ensure_dwd_icon_weather)
+    monkeypatch.setattr(lf, "load_dwd", fake_load_dwd)
+
+    config = _config(
+        tmp_path,
+        required_run="06",
+        test_start=date(2026, 5, 16),
+        test_end=date(2026, 5, 16),
+        dwd_folder_offset_date=date(2025, 10, 26),
+        dwd_icon_auto_update=True,
+        dwd_icon_raw_dir=tmp_path / "raw_dwd",
+        dwd_icon_aggregation_shapefile_path=tmp_path / "countries.shp",
+        dwd_icon_aggregation_n_clusters=25,
+    )
+
+    result = lf._build_load_weather_features(config)
+
+    assert calls["forecast_start"] == date(2026, 5, 16)
+    assert calls["forecast_end"] == date(2026, 5, 16)
+    assert calls["run_hour"] == "06"
+    assert calls["raw_base_dir"] == tmp_path / "raw_dwd"
+    assert calls["n_clusters"] == 25
+    assert calls["load_dwd_called"] is True
+    assert "weather_t2m_C_cluster_0" in result.columns
 
 
 def test_open_meteo_weather_features_use_existing_loader(monkeypatch, tmp_path: Path) -> None:

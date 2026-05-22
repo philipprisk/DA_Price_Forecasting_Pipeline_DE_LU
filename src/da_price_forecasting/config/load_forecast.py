@@ -114,6 +114,31 @@ class LoadForecastModelConfig(RepoConfigModel):
             date(2025, 10, 28),
         ]
     )
+    dwd_icon_auto_update: bool = False
+    dwd_icon_raw_dir: Path = Path("data/raw/dwd_icon_daily")
+    dwd_icon_base_url: str = "https://opendata.dwd.de/weather/nwp/icon-d2/grib/"
+    dwd_icon_download_variables: list[str] = Field(
+        default_factory=lambda: [
+            "t_2m",
+            "td_2m",
+            "p",
+            "u_10m",
+            "v_10m",
+            "vmax_10m",
+            "aswdir_s",
+            "aswdifd_s",
+            "tot_prec",
+            "h_snow",
+            "snow_gsp",
+        ]
+    )
+    dwd_icon_download_timeout_seconds: int = 60
+    dwd_icon_request_pause_seconds: float = 0.0
+    dwd_icon_force_update: bool = False
+    dwd_icon_catch_up_missing_days: bool = True
+    dwd_icon_aggregation_shapefile_path: Path = Path("data/shapefile/ne_10m_admin_0_countries.shp")
+    dwd_icon_aggregation_n_clusters: int | None = None
+    dwd_icon_aggregation_buffer_km: int = 50
 
     model_type: Literal["hist_gradient_boosting", "lightgbm", "ridge"] = "hist_gradient_boosting"
     model_granularity: Literal["global", "hour_block"] = "global"
@@ -233,6 +258,15 @@ class LoadForecastModelConfig(RepoConfigModel):
             return []
         return [int(item) for item in value]
 
+    @field_validator("dwd_icon_download_variables", mode="before")
+    @classmethod
+    def _coerce_dwd_icon_download_variables(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
     @model_validator(mode="after")
     def _resolve_paths(self) -> "LoadForecastModelConfig":
         if self.chunk_days < 1:
@@ -243,6 +277,14 @@ class LoadForecastModelConfig(RepoConfigModel):
             raise ValueError("min_train_days must be positive.")
         if self.target_availability_lag_days < 0:
             raise ValueError("target_availability_lag_days must be non-negative.")
+        if self.dwd_icon_download_timeout_seconds < 1:
+            raise ValueError("dwd_icon_download_timeout_seconds must be positive.")
+        if self.dwd_icon_request_pause_seconds < 0:
+            raise ValueError("dwd_icon_request_pause_seconds must be non-negative.")
+        if self.dwd_icon_aggregation_n_clusters is not None and self.dwd_icon_aggregation_n_clusters < 1:
+            raise ValueError("dwd_icon_aggregation_n_clusters must be positive when provided.")
+        if self.dwd_icon_aggregation_buffer_km < 0:
+            raise ValueError("dwd_icon_aggregation_buffer_km must be non-negative.")
         if any(lag_day <= 0 for lag_day in self.actual_load_lag_days):
             raise ValueError("actual_load_lag_days must contain positive integers.")
         if any(lag_day <= 0 for lag_day in self.entsoe_error_lag_days):
@@ -343,6 +385,8 @@ class LoadForecastModelConfig(RepoConfigModel):
         self.actual_load_file = resolve_path(self.actual_load_file, self.repo_root)
         self.entsoe_load_forecast_file = resolve_path(self.entsoe_load_forecast_file, self.repo_root)
         self.icon_dir = resolve_path(self.icon_dir, self.repo_root)
+        self.dwd_icon_raw_dir = resolve_path(self.dwd_icon_raw_dir, self.repo_root)
+        self.dwd_icon_aggregation_shapefile_path = resolve_path(self.dwd_icon_aggregation_shapefile_path, self.repo_root)
         self.open_meteo_weather_file = resolve_path(self.open_meteo_weather_file, self.repo_root)
         self.open_meteo_cluster_file = resolve_path(self.open_meteo_cluster_file, self.repo_root)
         self.export_dir = resolve_path(self.export_dir, self.repo_root)

@@ -859,6 +859,28 @@ def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFram
     if config.weather_source == "open_meteo":
         return _build_load_open_meteo_weather_features(config)
 
+    if config.dwd_icon_auto_update:
+        from ..preprocessing.dwd_icon_operational import ensure_dwd_icon_weather
+
+        ensure_dwd_icon_weather(
+            repo_root=config.repo_root,
+            icon_dir=config.icon_dir,
+            forecast_start=config.test_start,
+            forecast_end=config.test_end,
+            run_hour=config.required_run,
+            folder_offset_date=config.dwd_folder_offset_date,
+            raw_base_dir=config.dwd_icon_raw_dir,
+            shapefile_path=config.dwd_icon_aggregation_shapefile_path,
+            n_clusters=config.dwd_icon_aggregation_n_clusters,
+            buffer_km=config.dwd_icon_aggregation_buffer_km,
+            variables=config.dwd_icon_download_variables,
+            base_url=config.dwd_icon_base_url,
+            timeout_seconds=config.dwd_icon_download_timeout_seconds,
+            request_pause_seconds=config.dwd_icon_request_pause_seconds,
+            catch_up_missing_days=config.dwd_icon_catch_up_missing_days,
+            force=config.dwd_icon_force_update,
+        )
+
     df_hourly, df_qh = load_dwd(
         icon_dir=config.icon_dir,
         start_folder_date=config.start_folder_date,
