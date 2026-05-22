@@ -15,22 +15,32 @@ from ..models.sqra import (
 )
 
 
+def _deduplicate_forecast_index(forecast: pd.DataFrame) -> pd.DataFrame:
+    """Return a sorted forecast frame with one row per timestamp."""
+    if forecast.empty:
+        return forecast.sort_index()
+    ordered = forecast.sort_index()
+    if ordered.index.has_duplicates:
+        ordered = ordered.loc[~ordered.index.duplicated(keep="last")]
+    return ordered
+
+
 def build_sqra_panel(config: SqraConfig) -> tuple[pd.DataFrame, list[str]]:
     """Build the SQRA input panel from one or more point-forecast files."""
-    forecasts = [load_forecast(path) for path in config.import_paths]
+    forecasts = [_deduplicate_forecast_index(load_forecast(path)) for path in config.import_paths]
     feature_cols = [f"prediction_p{i + 1}" for i in range(len(forecasts))]
 
-    common_index = forecasts[0].index
+    common_index = forecasts[0].index.drop_duplicates()
     for forecast in forecasts[1:]:
-        common_index = common_index.intersection(forecast.index)
+        common_index = common_index.intersection(forecast.index.drop_duplicates())
     common_index = common_index.sort_values()
 
     df_qra = pd.DataFrame(index=common_index)
     for idx, fc in enumerate(forecasts):
-        df_qra[f"prediction_p{idx + 1}"] = fc.loc[common_index, "y_pred"]
+        df_qra[f"prediction_p{idx + 1}"] = fc.reindex(common_index)["y_pred"].to_numpy()
 
     if "y_true" in forecasts[0].columns:
-        df_qra["y_true"] = forecasts[0].loc[common_index, "y_true"]
+        df_qra["y_true"] = forecasts[0].reindex(common_index)["y_true"].to_numpy()
     else:
         df_qra["y_true"] = pd.NA
     df_qra["mtu"] = df_qra.index.hour * 4 + df_qra.index.minute // 15
