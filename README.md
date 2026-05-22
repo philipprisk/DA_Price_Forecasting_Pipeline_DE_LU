@@ -239,10 +239,10 @@ journalctl --user -u energy-arena-daily.service -f
 
 ### Daily Energy Arena load automation
 
-The load challenge uses the same VM pattern, but the source is a load model config instead of the EXAA-only price/SQRA pair. The default daily load runner uses:
+The load challenge uses the same VM pattern, but the source is a load model config instead of the EXAA-only price/SQRA pair. For the bwCloud deployment, use:
 
 ```text
-configs/load_forecast_hybrid_entsoe_residual_c25_run06_rich_temp_daily_weather_hgb_smooth_febapr.yaml
+configs/load_forecast_hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr.yaml
 ```
 
 Add the load challenge id to the VM-local `.env`:
@@ -254,64 +254,95 @@ nano .env
 
 The runner targets tomorrow in `Europe/Berlin`, rewrites the load model evaluation window to that one day, extends the cached ENTSO-E actual/load-forecast CSVs when needed, and submits the `Load_Model_MW` column as a point forecast.
 
-Because this model uses DWD ICON weather features, the VM must also have the required processed weather data before the submission run:
+Because this model uses DWD ICON weather features, the VM must also keep the processed live weather archive up to date:
 
 - `data/processed/icon_aggregated_c25_run06/`
 - `data/processed/load_forecast/weather_cluster_population_weights_c25.csv`
 
-If the LSDF ICON-D2 raw folder is mounted on the VM, use the combined weather+submission runner. The LSDF base must point to the directory that contains folders like `dwd_icon_daily_20260515`:
+LSDF is local/backfill-only and should not be part of the bwCloud deployment. On bwCloud, use the direct DWD open-data path:
 
-```bash
-nano .env
-# ENERGY_ARENA_LOAD_CHALLENGE_ID=20
-# DWD_ICON_LSDF_BASE=/path/to/mounted/lsdf/icon_by_Max_Kleinebrahm
+```text
+DWD opendata -> data/raw/dwd_icon_daily/... -> aggregation -> data/processed/icon_aggregated_c25_run06/...
 ```
 
-For a target day such as `2026-05-16`, the runner aggregates the DWD issue folder from `2026-05-15`, because the configured DWD folders map to the following forecast day after `2025-10-26`. It also catches up missing issue days between the latest processed folder and the target issue day.
-For example, if the latest ready processed folder is `dwd_icon_daily_20260512_06` and you request a forecast for `2026-05-26`, it aggregates all missing issue days `2026-05-13` through `2026-05-25` before fitting/submitting the model.
+The deployable load config has `dwd_icon_auto_update: true` and `dwd_icon_catch_up_missing_days: false`. For a target forecast day `D`, it fetches and aggregates only the required `D-1 06` DWD run if that processed folder is missing. It does not try to backfill older gaps from DWD open data.
 
-Run a dry run first:
+To update the DWD archive manually for tomorrow:
 
 ```bash
-pixi run energy-arena-load-daily --dry-run
+pixi run dwd-icon-daily-update
+```
+
+To update a specific target forecast day:
+
+```bash
+pixi run dwd-icon-daily-update --forecast-date 2026-05-23
+```
+
+For `2026-05-23`, this fetches and aggregates the `2026-05-22 06` DWD issue run.
+
+The load submission can then be tested with:
+
+```bash
+pixi run energy-arena-load-daily \
+  --model-config configs/load_forecast_hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr.yaml \
+  --dry-run
 ```
 
 To test a specific target day:
 
 ```bash
-pixi run energy-arena-load-daily --dry-run --forecast-date 2026-05-16
+pixi run energy-arena-load-daily \
+  --model-config configs/load_forecast_hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr.yaml \
+  --dry-run \
+  --forecast-date 2026-05-23
 ```
 
 To submit manually with retry behavior:
 
 ```bash
-pixi run energy-arena-load-daily --retry-until 11:55 --retry-interval-minutes 5
+pixi run energy-arena-load-daily \
+  --model-config configs/load_forecast_hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr.yaml \
+  --retry-until 11:55 \
+  --retry-interval-minutes 5
 ```
 
-To aggregate missing DWD data first and then submit:
+On the VM, create a user-level timer that refreshes the DWD archive before the load submission. This service retries on failure so it can wait for DWD to publish the live files:
 
 ```bash
-pixi run energy-arena-load-daily-with-weather --dry-run --forecast-date 2026-05-16
-pixi run energy-arena-load-daily-with-weather --retry-until 11:55 --retry-interval-minutes 5
+cat > ~/.config/systemd/user/dwd-icon-daily-update.service <<'EOF'
+[Unit]
+Description=Daily DWD ICON-D2 open-data download and aggregation
+StartLimitIntervalSec=2h
+StartLimitBurst=8
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
+ExecStart=%h/.pixi/bin/pixi run dwd-icon-daily-update
+Restart=on-failure
+RestartSec=10min
+EOF
+
+cat > ~/.config/systemd/user/dwd-icon-daily-update.timer <<'EOF'
+[Unit]
+Description=Run DWD ICON-D2 update daily before load submission
+
+[Timer]
+OnCalendar=*-*-* 10:15:00
+Persistent=true
+Unit=dwd-icon-daily-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now dwd-icon-daily-update.timer
+systemctl --user list-timers dwd-icon-daily-update.timer
 ```
 
-To only aggregate the missing DWD weather and exit:
-
-```bash
-pixi run energy-arena-load-daily-with-weather --weather-only --forecast-date 2026-05-16
-```
-
-If LSDF is not mounted on the VM, run the DWD processing locally while connected to KIT VPN and sync the processed output instead:
-
-```bash
-rsync -av data/processed/icon_aggregated_c25_run06/ \
-  bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/data/processed/icon_aggregated_c25_run06/
-
-rsync -av data/processed/load_forecast/weather_cluster_population_weights_c25.csv \
-  bwcloud-forecasting:~/DA_Price_Forecasting_Pipeline_DE_LU/data/processed/load_forecast/
-```
-
-On the VM, create a second user-level timer:
+Then create the load submission timer:
 
 ```bash
 cat > ~/.config/systemd/user/energy-arena-load-daily.service <<'EOF'
@@ -321,7 +352,7 @@ Description=Daily Energy Arena load forecast submission
 [Service]
 Type=oneshot
 WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
-ExecStart=%h/.pixi/bin/pixi run energy-arena-load-daily-with-weather --retry-until 11:55 --retry-interval-minutes 5
+ExecStart=%h/.pixi/bin/pixi run energy-arena-load-daily --model-config configs/load_forecast_hybrid_entsoe_residual_c25_run06_weighted_temp_morning_daily_weather_hgb_smooth_febapr.yaml --retry-until 11:55 --retry-interval-minutes 5
 EOF
 
 cat > ~/.config/systemd/user/energy-arena-load-daily.timer <<'EOF'
@@ -342,9 +373,10 @@ systemctl --user enable --now energy-arena-load-daily.timer
 systemctl --user list-timers energy-arena-load-daily.timer
 ```
 
-Inspect load logs with:
+Inspect logs with:
 
 ```bash
+journalctl --user -u dwd-icon-daily-update.service -f
 journalctl --user -u energy-arena-load-daily.service -f
 ```
 
