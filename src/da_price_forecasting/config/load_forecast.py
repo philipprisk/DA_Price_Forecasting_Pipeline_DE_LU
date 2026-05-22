@@ -65,13 +65,17 @@ class LoadForecastModelConfig(RepoConfigModel):
     include_weather_features: bool = True
     include_weighted_weather_features: bool = False
     include_weighted_weather_daily_features: bool = False
+    include_weighted_weather_inertia_features: bool = False
+    include_weather_cluster_spread_features: bool = False
     include_weather_time_interactions: bool = False
     include_regional_holiday_features: bool = False
     include_partial_load_features: bool = False
+    include_partial_load_shape_features: bool = False
     include_entsoe_forecast_features: bool = False
     include_entsoe_error_lag_features: bool = False
     include_entsoe_error_rolling_features: bool = False
     include_rich_temperature_features: bool = False
+    fetch_weather_only: bool = False
     calendar_harmonics: int = 1
 
     entsoe_load_forecast_file: Path = Path("data/processed/load_forecast/entsoe_load_forecast.csv")
@@ -83,6 +87,11 @@ class LoadForecastModelConfig(RepoConfigModel):
     weighted_weather_daily_feature_bases: list[str] = Field(default_factory=list)
     weighted_weather_daily_stats: list[str] = Field(default_factory=lambda: ["mean", "min", "max"])
     weighted_weather_daily_lag_days: list[int] = Field(default_factory=lambda: [1, 7])
+    weighted_weather_inertia_feature_bases: list[str] = Field(default_factory=list)
+    weighted_weather_inertia_windows_hours: list[int] = Field(default_factory=lambda: [24, 48, 72])
+    weighted_weather_inertia_stats: list[str] = Field(default_factory=lambda: ["mean", "delta_mean"])
+    weather_spread_feature_bases: list[str] = Field(default_factory=list)
+    weather_spread_stats: list[str] = Field(default_factory=lambda: ["min", "max", "range", "std"])
     weather_hdd_thresholds: list[float] = Field(default_factory=lambda: [18.0])
     weather_cdd_thresholds: list[float] = Field(default_factory=lambda: [22.0])
     keep_weather_cluster_features: bool = True
@@ -96,6 +105,7 @@ class LoadForecastModelConfig(RepoConfigModel):
     partial_load_comparison_lag_days: int = 7
     partial_load_morning_end_hour: int = 11
     partial_load_morning_end_minute: int = 45
+    partial_load_point_times: list[str] = Field(default_factory=list)
 
     actual_load_lag_days: list[int] = Field(default_factory=lambda: [2, 3, 7, 14])
     entsoe_error_lag_days: list[int] = Field(default_factory=lambda: [2, 3, 7, 14, 21])
@@ -224,9 +234,36 @@ class LoadForecastModelConfig(RepoConfigModel):
             return [value]
         return [str(item) for item in value]
 
+    @field_validator("weighted_weather_inertia_feature_bases", mode="before")
+    @classmethod
+    def _coerce_weighted_inertia_feature_bases(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
+    @field_validator("weather_spread_feature_bases", mode="before")
+    @classmethod
+    def _coerce_weather_spread_feature_bases(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
     @field_validator("weighted_weather_daily_stats", mode="before")
     @classmethod
     def _coerce_weighted_daily_stats(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
+    @field_validator("weighted_weather_inertia_stats", "weather_spread_stats", mode="before")
+    @classmethod
+    def _coerce_weather_stats(cls, value: Any) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -241,6 +278,24 @@ class LoadForecastModelConfig(RepoConfigModel):
         if isinstance(value, int):
             return [value]
         return [int(item) for item in value]
+
+    @field_validator("weighted_weather_inertia_windows_hours", mode="before")
+    @classmethod
+    def _coerce_weighted_inertia_windows_hours(cls, value: Any) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, int):
+            return [value]
+        return [int(item) for item in value]
+
+    @field_validator("partial_load_point_times", mode="before")
+    @classmethod
+    def _coerce_partial_load_point_times(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
 
     @field_validator("weather_hdd_thresholds", "weather_cdd_thresholds", mode="before")
     @classmethod
@@ -321,6 +376,10 @@ class LoadForecastModelConfig(RepoConfigModel):
             raise ValueError("weather_cluster_weight_file is required when include_weighted_weather_features is true.")
         if self.include_weighted_weather_daily_features and not self.include_weighted_weather_features:
             raise ValueError("include_weighted_weather_daily_features requires include_weighted_weather_features.")
+        if self.include_weighted_weather_inertia_features and not self.include_weighted_weather_features:
+            raise ValueError("include_weighted_weather_inertia_features requires include_weighted_weather_features.")
+        if self.include_weather_cluster_spread_features and not self.include_weather_features:
+            raise ValueError("include_weather_cluster_spread_features requires include_weather_features.")
         if self.include_regional_holiday_features and self.regional_holiday_weight_file is None:
             raise ValueError("regional_holiday_weight_file is required when include_regional_holiday_features is true.")
         if not self.weather_cluster_id_column:
@@ -349,6 +408,23 @@ class LoadForecastModelConfig(RepoConfigModel):
             raise ValueError(f"weighted_weather_daily_stats contains unsupported stats: {sorted(unknown_daily_stats)}")
         if any(lag_day <= 0 for lag_day in self.weighted_weather_daily_lag_days):
             raise ValueError("weighted_weather_daily_lag_days must contain positive integers.")
+        valid_inertia_stats = {"mean", "min", "max", "range", "delta_mean"}
+        unknown_inertia_stats = set(self.weighted_weather_inertia_stats) - valid_inertia_stats
+        if unknown_inertia_stats:
+            raise ValueError(f"weighted_weather_inertia_stats contains unsupported stats: {sorted(unknown_inertia_stats)}")
+        if any(window <= 0 for window in self.weighted_weather_inertia_windows_hours):
+            raise ValueError("weighted_weather_inertia_windows_hours must contain positive integers.")
+        valid_spread_stats = {"mean", "min", "max", "range", "std", "p10", "p90"}
+        unknown_spread_stats = set(self.weather_spread_stats) - valid_spread_stats
+        if unknown_spread_stats:
+            raise ValueError(f"weather_spread_stats contains unsupported stats: {sorted(unknown_spread_stats)}")
+        for point_time in self.partial_load_point_times:
+            parts = point_time.split(":")
+            if len(parts) != 2:
+                raise ValueError("partial_load_point_times entries must use HH:MM format.")
+            hour, minute = int(parts[0]), int(parts[1])
+            if not (0 <= hour <= 23) or minute not in {0, 15, 30, 45}:
+                raise ValueError("partial_load_point_times must be quarter-hour times between 00:00 and 23:45.")
         if self.include_rich_temperature_features:
             self.weather_hdd_thresholds = sorted({float(threshold) for threshold in self.weather_hdd_thresholds} | {18.0})
             self.weather_cdd_thresholds = sorted({float(threshold) for threshold in self.weather_cdd_thresholds} | {22.0})
