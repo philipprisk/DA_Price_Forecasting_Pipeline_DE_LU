@@ -51,8 +51,18 @@ def _calendar_window(
     )
 
 
+def _current_operational_day(target_tz: str) -> pd.Timestamp:
+    return pd.Timestamp.now(tz=target_tz).normalize()
+
+
 def _latest_operational_actual_day(target_tz: str) -> pd.Timestamp:
-    return pd.Timestamp.now(tz=target_tz).normalize() - pd.Timedelta(days=1)
+    return _current_operational_day(target_tz) - pd.Timedelta(days=1)
+
+
+def _partial_load_source_end_day(config: LoadForecastModelConfig) -> pd.Timestamp | None:
+    if not config.include_partial_load_features or config.test_end is None:
+        return None
+    return _as_local_day(config.test_end, config.target_tz) - pd.Timedelta(days=config.partial_load_reference_day)
 
 
 def _actual_load_fetch_window(
@@ -60,8 +70,23 @@ def _actual_load_fetch_window(
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     start, end = _calendar_window(config)
     if isinstance(config, LoadForecastModelConfig):
-        end = min(end, _latest_operational_actual_day(config.target_tz))
+        full_actual_end = min(end, _latest_operational_actual_day(config.target_tz))
+        partial_source_end = _partial_load_source_end_day(config)
+        if partial_source_end is not None:
+            partial_actual_end = min(partial_source_end, _current_operational_day(config.target_tz))
+            full_actual_end = max(full_actual_end, partial_actual_end)
+        end = min(end, full_actual_end)
     return start, end
+
+
+def _partial_load_refresh_day(config: LoadForecastModelConfig, fetch_end: pd.Timestamp) -> pd.Timestamp | None:
+    partial_source_end = _partial_load_source_end_day(config)
+    if partial_source_end is None:
+        return None
+    current_day = _current_operational_day(config.target_tz)
+    if partial_source_end == current_day and partial_source_end <= fetch_end:
+        return partial_source_end
+    return None
 
 
 def _restrict_timestamp_window(
@@ -135,7 +160,7 @@ def _load_or_fetch_windowed_cache(
 
 def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
     start, end = _actual_load_fetch_window(config)
-    return _load_or_fetch_windowed_cache(
+    actual = _load_or_fetch_windowed_cache(
         path=config.actual_load_file,
         target_tz=config.target_tz,
         start=start,
@@ -150,6 +175,23 @@ def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForec
             chunk_days=config.chunk_days,
         ),
     )
+    if isinstance(config, LoadForecastModelConfig):
+        refresh_day = _partial_load_refresh_day(config, end)
+        if refresh_day is not None:
+            fetched = fetch_actual_load(
+                start_day=refresh_day,
+                end_day=refresh_day,
+                country_code=config.country_code_entsoe,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+                chunk_days=config.chunk_days,
+            )
+            if not fetched.empty:
+                cached = _load_timestamp_csv(config.actual_load_file, config.target_tz) if config.actual_load_file.exists() else actual
+                combined = _combine_timestamp_frames([cached, fetched])
+                _save_timestamp_csv(combined, config.actual_load_file)
+                actual = _restrict_timestamp_window(combined, start, end, config.target_tz)
+    return actual
 
 
 def _load_or_fetch_entsoe_load_forecast(config: EntsoeLoadForecastBenchmarkConfig) -> pd.DataFrame:
@@ -503,7 +545,48 @@ def _actual_load_window_stats(
     window = base.loc[window_mask].copy()
     window["_date"] = pd.Index(local_index[window_mask].date)
     grouped = window.groupby("_date")["load_actual"]
-    return grouped.agg(["mean", "min", "max", "last"]).sort_index()
+    stats = grouped.agg(["mean", "min", "max", "first", "last"]).sort_index()
+    stats["range"] = stats["max"] - stats["min"]
+    stats["ramp"] = stats["last"] - stats["first"]
+    return stats
+
+
+def _time_label(value: str) -> str:
+    hour, minute = (int(part) for part in value.split(":", maxsplit=1))
+    return f"{hour:02d}{minute:02d}"
+
+
+def _actual_load_point_values(
+    actual_load: pd.DataFrame,
+    *,
+    target_tz: str,
+    point_times: list[str],
+) -> pd.DataFrame:
+    if not point_times:
+        return pd.DataFrame()
+    if "load_actual" not in actual_load.columns:
+        raise ValueError("Actual load data must contain a 'load_actual' column.")
+
+    base = actual_load[["load_actual"]].astype(float).sort_index().copy()
+    local_index = base.index.tz_convert(target_tz) if base.index.tz is not None else base.index.tz_localize(target_tz)
+    minute_of_day = local_index.hour * 60 + local_index.minute
+    local_dates = pd.Index(local_index.date)
+    requested_minutes = {
+        _time_label(point_time): int(point_time.split(":", maxsplit=1)[0]) * 60 + int(point_time.split(":", maxsplit=1)[1])
+        for point_time in point_times
+    }
+
+    columns: dict[str, pd.Series] = {}
+    for label, minute in requested_minutes.items():
+        mask = minute_of_day == minute
+        if not mask.any():
+            continue
+        values = pd.Series(base.loc[mask, "load_actual"].to_numpy(dtype=float), index=local_dates[mask])
+        columns[label] = values.groupby(level=0).last()
+
+    if not columns:
+        return pd.DataFrame()
+    return pd.DataFrame(columns).sort_index()
 
 
 def _build_partial_load_features(
@@ -515,6 +598,8 @@ def _build_partial_load_features(
     comparison_lag_days: int,
     morning_end_hour: int,
     morning_end_minute: int = 45,
+    include_shape_features: bool = False,
+    point_times: list[str] | None = None,
 ) -> pd.DataFrame:
     local_index = index.tz_convert(target_tz) if index.tz is not None else index.tz_localize(target_tz)
     local_dates = pd.Series(local_index.date, index=index)
@@ -543,6 +628,9 @@ def _build_partial_load_features(
         source.index = target_dates
         for stat in ["mean", "min", "max", "last"]:
             daily_features[f"partial_load_d{reference_day}_{label}_{stat}"] = source[stat].to_numpy(dtype=float)
+        if include_shape_features:
+            for stat in ["first", "range", "ramp"]:
+                daily_features[f"partial_load_d{reference_day}_{label}_{stat}"] = source[stat].to_numpy(dtype=float)
 
         comparison = stats.reindex(comparison_dates)
         comparison.index = target_dates
@@ -552,6 +640,27 @@ def _build_partial_load_features(
         daily_features[f"partial_load_d{reference_day}_{label}_last_diff_d{comparison_lag_days}"] = (
             source["last"] - comparison["last"]
         ).to_numpy(dtype=float)
+        if include_shape_features:
+            for stat in ["range", "ramp"]:
+                daily_features[f"partial_load_d{reference_day}_{label}_{stat}_diff_d{comparison_lag_days}"] = (
+                    source[stat] - comparison[stat]
+                ).to_numpy(dtype=float)
+
+    point_values = _actual_load_point_values(
+        actual_load,
+        target_tz=target_tz,
+        point_times=point_times or [],
+    )
+    if not point_values.empty:
+        source_points = point_values.reindex(source_dates)
+        source_points.index = target_dates
+        comparison_points = point_values.reindex(comparison_dates)
+        comparison_points.index = target_dates
+        for label in point_values.columns:
+            daily_features[f"partial_load_d{reference_day}_point_{label}"] = source_points[label].to_numpy(dtype=float)
+            daily_features[f"partial_load_d{reference_day}_point_{label}_diff_d{comparison_lag_days}"] = (
+                source_points[label] - comparison_points[label]
+            ).to_numpy(dtype=float)
 
     features = daily_features.reindex(local_dates.to_numpy()).set_index(index)
     features.index.name = "timestamp"
@@ -827,6 +936,103 @@ def _add_weighted_weather_daily_features(
     expanded = daily_features.reindex(local_days.to_numpy()).set_index(features.index)
     expanded.index.name = features.index.name
     result = pd.concat([features, expanded], axis=1)
+    return result.loc[:, ~result.columns.duplicated()]
+
+
+def _add_weather_cluster_spread_features(
+    features: pd.DataFrame,
+    *,
+    prefix: str = "weather_spread",
+    base_names: list[str] | None = None,
+    stats: list[str] | None = None,
+) -> pd.DataFrame:
+    if features.empty:
+        return features
+
+    requested_stats = stats or ["min", "max", "range", "std"]
+    allowed_base_names = _normalise_weather_base_names(base_names)
+    grouped_columns: dict[str, list[str]] = {}
+    for column in features.columns:
+        parsed = _split_weather_cluster_column(column)
+        if parsed is None:
+            continue
+        base_name, _cluster_id = parsed
+        if allowed_base_names is not None and base_name not in allowed_base_names:
+            continue
+        grouped_columns.setdefault(base_name, []).append(column)
+
+    spread_data: dict[str, pd.Series] = {}
+    for base_name, columns in grouped_columns.items():
+        values = features[sorted(columns)].astype(float)
+        output_base = base_name.removeprefix("weather_")
+        if "mean" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_mean"] = values.mean(axis=1)
+        if "min" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_min"] = values.min(axis=1)
+        if "max" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_max"] = values.max(axis=1)
+        if "range" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_range"] = values.max(axis=1) - values.min(axis=1)
+        if "std" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_std"] = values.std(axis=1)
+        if "p10" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_p10"] = values.quantile(0.10, axis=1)
+        if "p90" in requested_stats:
+            spread_data[f"{prefix}_{output_base}_p90"] = values.quantile(0.90, axis=1)
+
+    if not spread_data:
+        return features
+    spread_features = pd.DataFrame(spread_data, index=features.index)
+    result = pd.concat([features, spread_features], axis=1)
+    return result.loc[:, ~result.columns.duplicated()]
+
+
+def _add_weighted_weather_inertia_features(
+    features: pd.DataFrame,
+    *,
+    prefix: str,
+    base_names: list[str] | None,
+    windows_hours: list[int],
+    stats: list[str],
+) -> pd.DataFrame:
+    if features.empty:
+        return features
+
+    bases = base_names or ["t2m_C", "hdd18", "cdd22"]
+    columns = [
+        f"{prefix}_{base_name.removeprefix('weather_').removeprefix(prefix + '_')}"
+        for base_name in bases
+    ]
+    columns = [column for column in columns if column in features.columns]
+    if not columns:
+        return features
+
+    inertia_data: dict[str, pd.Series] = {}
+    sorted_features = features.sort_index()
+    for column in columns:
+        values = sorted_features[column].astype(float)
+        for window_hours in sorted({int(window) for window in windows_hours if int(window) > 0}):
+            rolling = values.rolling(
+                window=pd.Timedelta(hours=window_hours),
+                min_periods=max(1, int(window_hours * 2)),
+            )
+            if "mean" in stats or "delta_mean" in stats:
+                mean = rolling.mean()
+                if "mean" in stats:
+                    inertia_data[f"{column}_roll{window_hours}h_mean"] = mean
+                if "delta_mean" in stats:
+                    inertia_data[f"{column}_minus_roll{window_hours}h_mean"] = values - mean
+            if "min" in stats:
+                inertia_data[f"{column}_roll{window_hours}h_min"] = rolling.min()
+            if "max" in stats:
+                inertia_data[f"{column}_roll{window_hours}h_max"] = rolling.max()
+            if "range" in stats:
+                inertia_data[f"{column}_roll{window_hours}h_range"] = rolling.max() - rolling.min()
+
+    if not inertia_data:
+        return features
+    inertia_features = pd.DataFrame(inertia_data, index=sorted_features.index).reindex(features.index)
+    result = pd.concat([features, inertia_features], axis=1)
     return result.loc[:, ~result.columns.duplicated()]
 
 
@@ -1107,6 +1313,8 @@ def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame
                 comparison_lag_days=config.partial_load_comparison_lag_days,
                 morning_end_hour=config.partial_load_morning_end_hour,
                 morning_end_minute=config.partial_load_morning_end_minute,
+                include_shape_features=config.include_partial_load_shape_features,
+                point_times=config.partial_load_point_times,
             )
         )
 
@@ -1124,6 +1332,12 @@ def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame
 
     features = pd.concat(feature_blocks, axis=1).sort_index()
     features = features.loc[:, ~features.columns.duplicated()]
+    if config.include_weather_cluster_spread_features:
+        features = _add_weather_cluster_spread_features(
+            features,
+            base_names=config.weather_spread_feature_bases or config.weather_weighted_feature_bases,
+            stats=config.weather_spread_stats,
+        )
     if config.include_weighted_weather_features:
         if config.weather_cluster_weight_file is None:
             raise ValueError("weather_cluster_weight_file is required when include_weighted_weather_features is true.")
@@ -1145,6 +1359,14 @@ def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame
                 base_names=config.weighted_weather_daily_feature_bases or config.weather_weighted_feature_bases,
                 stats=config.weighted_weather_daily_stats,
                 lag_days=config.weighted_weather_daily_lag_days,
+            )
+        if config.include_weighted_weather_inertia_features:
+            features = _add_weighted_weather_inertia_features(
+                features,
+                prefix=config.weather_weighted_feature_prefix,
+                base_names=config.weighted_weather_inertia_feature_bases or config.weather_weighted_feature_bases,
+                windows_hours=config.weighted_weather_inertia_windows_hours,
+                stats=config.weighted_weather_inertia_stats,
             )
         if not config.keep_weather_cluster_features:
             features = _drop_weather_cluster_features(features)
@@ -1708,6 +1930,12 @@ def run_load_forecast_pipeline(
     save_outputs: bool = True,
 ) -> dict[str, pd.DataFrame]:
     load_dotenv(config.repo_root / ".env")
+    if config.fetch_weather_only:
+        print("\n--- Fetching Load Weather Data ---")
+        weather = _build_load_weather_features(config)
+        print(f"Weather: {weather.shape[0]:,} rows, {weather.shape[1]:,} columns")
+        return {"weather": weather}
+
     print("\n--- Building Load Forecast Dataset ---")
     dataset = build_load_forecast_dataset(config)
     print(f"Dataset: {dataset.shape[0]:,} rows, {dataset.shape[1]:,} columns")

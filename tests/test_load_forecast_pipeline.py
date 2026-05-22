@@ -26,6 +26,95 @@ def _config(tmp_path: Path, **overrides) -> LoadForecastModelConfig:
     return LoadForecastModelConfig(**data)
 
 
+def test_actual_load_fetch_window_includes_partial_current_day(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        lf,
+        "_current_operational_day",
+        lambda target_tz: pd.Timestamp("2026-05-22", tz=target_tz),
+    )
+
+    config = _config(
+        tmp_path,
+        entsoe_start_date=date(2026, 5, 1),
+        entsoe_end_date=date(2026, 5, 23),
+        test_start=date(2026, 5, 23),
+        test_end=date(2026, 5, 23),
+        include_partial_load_features=True,
+        partial_load_reference_day=1,
+    )
+
+    _, end = lf._actual_load_fetch_window(config)
+
+    assert end == pd.Timestamp("2026-05-22", tz="Europe/Berlin")
+
+
+def test_actual_load_fetch_window_without_partial_stops_at_latest_complete_day(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        lf,
+        "_current_operational_day",
+        lambda target_tz: pd.Timestamp("2026-05-22", tz=target_tz),
+    )
+
+    config = _config(
+        tmp_path,
+        entsoe_start_date=date(2026, 5, 1),
+        entsoe_end_date=date(2026, 5, 23),
+        test_start=date(2026, 5, 23),
+        test_end=date(2026, 5, 23),
+        include_partial_load_features=False,
+    )
+
+    _, end = lf._actual_load_fetch_window(config)
+
+    assert end == pd.Timestamp("2026-05-21", tz="Europe/Berlin")
+
+
+def test_actual_load_fetch_refreshes_current_partial_day(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        lf,
+        "_current_operational_day",
+        lambda target_tz: pd.Timestamp("2026-05-22", tz=target_tz),
+    )
+
+    actual_file = tmp_path / "actual_load.csv"
+    cached_index = pd.to_datetime(
+        [
+            "2026-05-20T00:00:00+02:00",
+            "2026-05-21T00:00:00+02:00",
+            "2026-05-22T00:00:00+02:00",
+        ],
+        utc=True,
+    ).tz_convert("Europe/Berlin")
+    pd.DataFrame({"load_actual": [1.0, 2.0, 3.0]}, index=cached_index).to_csv(actual_file)
+
+    fetched_index = pd.to_datetime(["2026-05-22T10:15:00+02:00"], utc=True).tz_convert("Europe/Berlin")
+    fetched = pd.DataFrame({"load_actual": [99.0]}, index=fetched_index)
+    calls = []
+
+    def fake_fetch_actual_load(**kwargs):
+        calls.append(kwargs)
+        return fetched
+
+    monkeypatch.setattr(lf, "fetch_actual_load", fake_fetch_actual_load)
+
+    config = _config(
+        tmp_path,
+        actual_load_file=actual_file,
+        entsoe_start_date=date(2026, 5, 20),
+        entsoe_end_date=date(2026, 5, 23),
+        test_start=date(2026, 5, 23),
+        test_end=date(2026, 5, 23),
+        include_partial_load_features=True,
+        partial_load_reference_day=1,
+    )
+
+    result = lf._load_or_fetch_actual_load(config)
+
+    assert len(calls) == 1
+    assert calls[0]["start_day"] == pd.Timestamp("2026-05-22", tz="Europe/Berlin")
+    assert result.loc[fetched_index[0], "load_actual"] == 99.0
+
+
 def test_build_load_forecast_dataset_adds_calendar_lags_and_weather(monkeypatch, tmp_path: Path) -> None:
     index = pd.date_range("2026-01-01T00:00:00+01:00", periods=10 * 96, freq="15min")
     actual = pd.DataFrame({"load_actual": 50_000.0 + np.arange(len(index), dtype=float)}, index=index)
@@ -347,6 +436,40 @@ def test_partial_load_features_support_quarter_hour_cutoff() -> None:
     ]
 
 
+def test_partial_load_features_can_add_shape_and_point_values() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=12 * 96, freq="15min")
+    actual = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    features = lf._build_partial_load_features(
+        actual,
+        pd.date_range("2026-01-10T00:00:00+01:00", periods=96, freq="15min"),
+        target_tz="Europe/Berlin",
+        reference_day=1,
+        comparison_lag_days=7,
+        morning_end_hour=10,
+        morning_end_minute=15,
+        include_shape_features=True,
+        point_times=["06:00", "10:15"],
+    )
+
+    timestamp = pd.Timestamp("2026-01-10T12:00:00+01:00")
+    d1 = actual.loc["2026-01-09T00:00:00+01:00":"2026-01-09T10:15:00+01:00", "load_actual"]
+    d8 = actual.loc["2026-01-02T00:00:00+01:00":"2026-01-02T10:15:00+01:00", "load_actual"]
+
+    assert np.isclose(features.loc[timestamp, "partial_load_d1_00_1015_range"], d1.max() - d1.min())
+    assert np.isclose(
+        features.loc[timestamp, "partial_load_d1_00_1015_ramp_diff_d7"],
+        (d1.iloc[-1] - d1.iloc[0]) - (d8.iloc[-1] - d8.iloc[0]),
+    )
+    assert features.loc[timestamp, "partial_load_d1_point_0600"] == actual.loc[
+        pd.Timestamp("2026-01-09T06:00:00+01:00"),
+        "load_actual",
+    ]
+    assert features.loc[timestamp, "partial_load_d1_point_1015"] == actual.loc[
+        pd.Timestamp("2026-01-09T10:15:00+01:00"),
+        "load_actual",
+    ]
+
+
 def test_entsoe_error_features_use_safe_lags_and_rolling_history(monkeypatch, tmp_path: Path) -> None:
     index = pd.date_range("2026-01-01T00:00:00+01:00", periods=12 * 96, freq="15min")
     mtu = index.hour * 4 + index.minute // 15
@@ -401,6 +524,48 @@ def test_weighted_weather_daily_features_add_daily_stats_and_diffs() -> None:
     assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_daily_mean"], 16.5)
     assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_daily_mean_diff_d1"], 4.5)
     assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_daily_range"], 3.0)
+
+
+def test_weather_cluster_spread_features_add_cross_cluster_stats() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=2, freq="15min")
+    features = pd.DataFrame(
+        {
+            "weather_t2m_C_cluster_0": [10.0, 20.0],
+            "weather_t2m_C_cluster_1": [20.0, 40.0],
+            "weather_hdd18_cluster_0": [8.0, 0.0],
+            "weather_hdd18_cluster_1": [0.0, 0.0],
+        },
+        index=index,
+    )
+
+    result = lf._add_weather_cluster_spread_features(
+        features,
+        base_names=["t2m_C"],
+        stats=["min", "max", "range", "std", "p10", "p90"],
+    )
+
+    assert "weather_spread_t2m_C_range" in result.columns
+    assert "weather_spread_hdd18_range" not in result.columns
+    assert np.isclose(result.loc[index[0], "weather_spread_t2m_C_range"], 10.0)
+    assert np.isclose(result.loc[index[1], "weather_spread_t2m_C_p90"], 38.0)
+
+
+def test_weighted_weather_inertia_features_add_rolling_history() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=12, freq="15min")
+    features = pd.DataFrame({"weather_weighted_t2m_C": np.arange(len(index), dtype=float)}, index=index)
+
+    result = lf._add_weighted_weather_inertia_features(
+        features,
+        prefix="weather_weighted",
+        base_names=["t2m_C"],
+        windows_hours=[1],
+        stats=["mean", "range", "delta_mean"],
+    )
+
+    timestamp = index[4]
+    assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_roll1h_mean"], 2.5)
+    assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_roll1h_range"], 3.0)
+    assert np.isclose(result.loc[timestamp, "weather_weighted_t2m_C_minus_roll1h_mean"], 1.5)
 
 
 def test_rolling_load_forecast_can_model_entsoe_residual(tmp_path: Path) -> None:
