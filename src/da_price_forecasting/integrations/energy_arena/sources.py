@@ -274,6 +274,8 @@ def _run_or_load_load_forecast_model(
         config.test_start = forecast_day.date()
         config.test_end = forecast_day.date()
         config.entsoe_end_date = forecast_day.date()
+        if config.weather_source == "open_meteo":
+            config.open_meteo_end_date = forecast_day.date()
         config.export_dir = forecast_dir
         result = run_load_forecast_pipeline(config=config, save_outputs=True)
         forecast = result["forecast"]

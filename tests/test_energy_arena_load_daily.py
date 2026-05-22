@@ -78,6 +78,8 @@ def test_load_energy_arena_source_rewrites_forecast_window(monkeypatch, tmp_path
                     "entsoe_load_forecast_file": str(tmp_path / "load_forecast.csv"),
                     "icon_dir": str(tmp_path / "icon"),
                     "export_dir": str(tmp_path / "old_export"),
+                    "weather_source": "open_meteo",
+                    "open_meteo_end_date": "2026-04-23",
                     "include_weather_features": False,
                     "include_holiday_features": False,
                 },
@@ -101,6 +103,7 @@ def test_load_energy_arena_source_rewrites_forecast_window(monkeypatch, tmp_path
     assert captured["config"].test_start.isoformat() == "2026-05-16"
     assert captured["config"].test_end.isoformat() == "2026-05-16"
     assert captured["config"].entsoe_end_date.isoformat() == "2026-05-16"
+    assert captured["config"].open_meteo_end_date.isoformat() == "2026-05-16"
     assert captured["config"].export_dir == forecast_dir
 
 

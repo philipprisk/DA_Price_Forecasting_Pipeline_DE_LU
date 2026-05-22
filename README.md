@@ -307,6 +307,13 @@ pixi run energy-arena-load-daily \
   --retry-interval-minutes 5
 ```
 
+For the Open-Meteo ICON-D2 single-run load model, use the dedicated task. The daily Energy Arena wrapper rewrites the evaluation day and also extends `open_meteo_end_date` to the target forecast day, so the Open-Meteo cache resumes/fetches the missing target-day weather before fitting:
+
+```bash
+pixi run energy-arena-load-open-meteo-daily --dry-run --forecast-date 2026-05-23
+pixi run energy-arena-load-open-meteo-daily --retry-until 11:55 --retry-interval-minutes 5
+```
+
 On the VM, create a user-level timer that refreshes the DWD archive before the load submission. This service retries on failure so it can wait for DWD to publish the live files:
 
 ```bash
@@ -378,6 +385,43 @@ Inspect logs with:
 ```bash
 journalctl --user -u dwd-icon-daily-update.service -f
 journalctl --user -u energy-arena-load-daily.service -f
+```
+
+To deploy the Open-Meteo load model as a separate automatic submission, create a second load service/timer with its own unit name:
+
+```bash
+cat > ~/.config/systemd/user/energy-arena-load-open-meteo-daily.service <<'EOF'
+[Unit]
+Description=Daily Energy Arena Open-Meteo load forecast submission
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
+ExecStart=%h/.pixi/bin/pixi run energy-arena-load-open-meteo-daily --retry-until 11:55 --retry-interval-minutes 5
+EOF
+
+cat > ~/.config/systemd/user/energy-arena-load-open-meteo-daily.timer <<'EOF'
+[Unit]
+Description=Run Energy Arena Open-Meteo load submission daily at 11:35 Europe/Berlin
+
+[Timer]
+OnCalendar=*-*-* 11:35:00
+Persistent=true
+Unit=energy-arena-load-open-meteo-daily.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now energy-arena-load-open-meteo-daily.timer
+systemctl --user list-timers energy-arena-load-open-meteo-daily.timer
+```
+
+Inspect Open-Meteo load logs with:
+
+```bash
+journalctl --user -u energy-arena-load-open-meteo-daily.service -f
 ```
 
 For data/results transfer, use `rsync` from your local machine:
