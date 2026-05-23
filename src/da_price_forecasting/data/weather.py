@@ -303,9 +303,24 @@ def _fetch_open_meteo_batch(
     if model:
         params["models"] = model
 
-    last_error: requests.HTTPError | None = None
+    last_error: Exception | None = None
+    response: requests.Response | None = None
     for attempt in range(retry_attempts + 1):
-        response = requests.get(base_url, params=params, timeout=timeout_seconds)
+        try:
+            response = requests.get(base_url, params=params, timeout=timeout_seconds)
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt >= retry_attempts:
+                raise
+
+            sleep_seconds = retry_backoff_seconds * (attempt + 1)
+            print(
+                f"[OPEN-METEO] Request failed with {type(exc).__name__}. "
+                f"Retrying in {sleep_seconds:.0f}s ({attempt + 1}/{retry_attempts})..."
+            )
+            time.sleep(sleep_seconds)
+            continue
+
         if response.status_code != 429:
             response.raise_for_status()
             break
@@ -334,6 +349,9 @@ def _fetch_open_meteo_batch(
     else:
         if last_error is not None:
             raise last_error
+
+    if response is None:
+        raise RuntimeError("Open-Meteo request failed without a response.")
 
     payload = response.json()
     if isinstance(payload, dict) and "error" in payload:
