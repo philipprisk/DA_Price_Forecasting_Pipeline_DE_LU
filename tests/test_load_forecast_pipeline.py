@@ -302,8 +302,43 @@ def test_open_meteo_weather_features_use_existing_loader(monkeypatch, tmp_path: 
     assert "weather_cdd24_cluster_0" in features.columns
     assert "weather_wind_speed_10m_cluster_0" in features.columns
     assert "weather_solar_global_cluster_0" in features.columns
+    assert "weather_rel_humidity_pct_cluster_0" in features.columns
+    assert "weather_vpd_hPa_cluster_0" in features.columns
     assert np.isclose(features.loc[weather_index[0], "weather_wind_speed_10m_cluster_0"], 5.0)
     assert features.loc[weather_index[1], "weather_solar_diffuse_cluster_0"] == 40.0
+    assert 0.0 <= features.loc[weather_index[0], "weather_rel_humidity_pct_cluster_0"] <= 100.0
+    assert features.loc[weather_index[1], "weather_vpd_hPa_cluster_0"] > 0.0
+
+
+def test_open_meteo_weather_features_extend_final_hour_to_full_quarter_day(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    weather_index = pd.date_range("2026-05-24", periods=24, freq="h", tz="Europe/Berlin")
+    weather = pd.DataFrame(
+        {
+            "t2m_cluster_0": np.full(len(weather_index), 293.15),
+            "ssrd_cluster_0": np.arange(len(weather_index), dtype=float),
+        },
+        index=weather_index,
+    )
+    monkeypatch.setattr(lf, "load_open_meteo", lambda **kwargs: weather)
+
+    features = lf._build_load_weather_features(
+        _config(
+            tmp_path,
+            weather_source="open_meteo",
+            open_meteo_cluster_file=tmp_path / "clusters.parquet",
+            open_meteo_weather_file=tmp_path / "open_meteo.csv",
+        )
+    )
+
+    day = pd.Timestamp("2026-05-24", tz="Europe/Berlin")
+    day_features = features.loc[day: day + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)]
+
+    assert len(day_features) == 96
+    assert day_features.index[-1] == pd.Timestamp("2026-05-24T23:45:00+02:00")
+    assert day_features["weather_t2m_C_cluster_0"].notna().all()
 
 
 def test_weighted_weather_features_use_cluster_weights() -> None:

@@ -1061,6 +1061,27 @@ def _add_temperature_weather_columns(
         data[f"weather_cdd{label}_cluster_{cluster}"] = np.clip(temp_c - float(threshold), 0.0, None)
 
 
+def _saturation_vapor_pressure_hpa(temp_c: np.ndarray) -> np.ndarray:
+    return 6.1094 * np.exp((17.625 * temp_c) / (243.04 + temp_c))
+
+
+def _add_humidity_weather_columns(
+    data: dict[str, np.ndarray],
+    *,
+    cluster: str,
+    temp_k: np.ndarray,
+    dewpoint_k: np.ndarray,
+) -> None:
+    temp_c = temp_k.astype(float) - 273.15
+    dewpoint_c = dewpoint_k.astype(float) - 273.15
+    saturation = _saturation_vapor_pressure_hpa(temp_c)
+    actual = _saturation_vapor_pressure_hpa(dewpoint_c)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        relative_humidity = np.clip(100.0 * actual / saturation, 0.0, 100.0)
+    data[f"weather_rel_humidity_pct_cluster_{cluster}"] = relative_humidity
+    data[f"weather_vpd_hPa_cluster_{cluster}"] = np.clip(saturation - actual, 0.0, None)
+
+
 def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFrame:
     if config.weather_source == "open_meteo":
         return _build_load_open_meteo_weather_features(config)
@@ -1111,7 +1132,16 @@ def _build_load_weather_features(config: LoadForecastModelConfig) -> pd.DataFram
 
     for column in sorted(col for col in df_hourly.columns if col.startswith("td2m_cluster_")):
         cluster = _cluster_id(column)
-        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = df_hourly[column].to_numpy(dtype=float) - 273.15
+        dewpoint_k = df_hourly[column].to_numpy(dtype=float)
+        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = dewpoint_k - 273.15
+        temp_column = f"t2m_cluster_{cluster}"
+        if temp_column in df_hourly.columns:
+            _add_humidity_weather_columns(
+                hourly_data,
+                cluster=cluster,
+                temp_k=df_hourly[temp_column].to_numpy(dtype=float),
+                dewpoint_k=dewpoint_k,
+            )
 
     for prefix, name in [
         ("sp_cluster_", "weather_sp_Pa"),
@@ -1200,7 +1230,16 @@ def _build_load_open_meteo_weather_features(config: LoadForecastModelConfig) -> 
 
     for column in sorted(col for col in weather.columns if col.startswith("td2m_cluster_")):
         cluster = _cluster_id(column)
-        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = weather[column].to_numpy(dtype=float) - 273.15
+        dewpoint_k = weather[column].to_numpy(dtype=float)
+        hourly_data[f"weather_td2m_C_cluster_{cluster}"] = dewpoint_k - 273.15
+        temp_column = f"t2m_cluster_{cluster}"
+        if temp_column in weather.columns:
+            _add_humidity_weather_columns(
+                hourly_data,
+                cluster=cluster,
+                temp_k=weather[temp_column].to_numpy(dtype=float),
+                dewpoint_k=dewpoint_k,
+            )
 
     for prefix, name in [
         ("sp_cluster_", "weather_sp_Pa"),
@@ -1242,7 +1281,7 @@ def _build_load_open_meteo_weather_features(config: LoadForecastModelConfig) -> 
     qh_features = pd.DataFrame(qh_data, index=weather.index)
     full_index = pd.date_range(
         start=weather.index.min(),
-        end=weather.index.max(),
+        end=weather.index.max() + pd.Timedelta(minutes=45),
         freq="15min",
         tz=config.target_tz,
         name="timestamp",
