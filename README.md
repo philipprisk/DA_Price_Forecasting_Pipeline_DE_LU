@@ -45,3 +45,6 @@ cp .env.example .env
 1. Run `pipeline/lear/lear_pipeline.ipynb` to generate point forecasts and ANC feature importance
 2. Run `pipeline/sqra/sqra_pipeline.ipynb` to generate quantile forecasts
 3. Run `evaluation/evaluation.ipynb` for model evaluation
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
