@@ -572,7 +572,10 @@ def fetch_open_meteo_cluster_weather(
 
     if output_file is not None:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        weather.to_csv(output_file)
+        if api_mode == "single_run" and completed_weather is not None:
+            completed_weather.to_csv(output_file)
+        else:
+            weather.to_csv(output_file)
 
     return weather
 
