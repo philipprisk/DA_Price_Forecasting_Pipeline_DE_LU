@@ -124,7 +124,7 @@ tabpfn-local = { cmd = "da-price-forecast --config configs/tabpfn_local.yaml", d
 energy-arena-point = { cmd = "da-price-forecast --config configs/energy_arena_point_submission.yaml", default-environment = "lear" }
 energy-arena-daily = { cmd = "da-price-energy-arena-daily", default-environment = "lear" }
 energy-arena-load-daily = { cmd = "da-price-energy-arena-load-daily", default-environment = "lear" }
-energy-arena-load-open-meteo-daily = { cmd = "da-price-energy-arena-load-daily --model-config configs/load_forecast_hybrid_entsoe_residual_open_meteo_icon_d2_single_run06_grid_mean_p10_morning1015_daily_weather_hgb_smooth_febapr.yaml --approach-name load_open_meteo_icon_d2_single_run06_grid_mean_p10_morning1015", default-environment = "lear" }
+energy-arena-load-open-meteo-daily = { cmd = "da-price-energy-arena-load-daily --model-config configs/load_forecast_hybrid_entsoe_residual_open_meteo_p10_morning1015_daily_weather_hgb_smooth_mar_may22_tw224_f140_weather_spread_broad_f160.yaml --approach-name load_open_meteo_p10_morning1015_weather_spread_broad_f160", default-environment = "lear" }
 energy-arena-load-daily-with-weather = { cmd = "da-price-energy-arena-load-daily-with-weather", default-environment = "ops" }
 dwd-icon-daily-update = { cmd = "da-price-dwd-icon-daily-update", default-environment = "ops" }
 test = { cmd = "pytest", default-environment = "dev" }
