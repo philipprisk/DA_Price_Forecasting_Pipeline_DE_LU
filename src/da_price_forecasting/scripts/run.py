@@ -17,6 +17,7 @@ from ..config import (
     IconAggregationConfig,
     LearAncConfig,
     LearOperationalConfig,
+    LoadForecastEnsembleConfig,
     LoadForecastModelConfig,
     MastrCapacityConfig,
     PopulationClusterWeightsConfig,
@@ -105,6 +106,13 @@ def run_from_config(run_config: RunConfig, submit_override: bool = False) -> Non
 
         config = _load_nested_config(run_config, LoadForecastModelConfig)
         run_load_forecast_pipeline(config=config, save_outputs=run_config.save_outputs)
+        return
+
+    if kind == RunKind.LOAD_FORECAST_ENSEMBLE:
+        from ..pipelines.load_forecast import run_load_forecast_ensemble_pipeline
+
+        config = _load_nested_config(run_config, LoadForecastEnsembleConfig)
+        run_load_forecast_ensemble_pipeline(config=config, save_outputs=run_config.save_outputs)
         return
 
     if kind == RunKind.SQRA:

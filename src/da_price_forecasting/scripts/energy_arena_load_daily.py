@@ -21,6 +21,7 @@ DEFAULT_MODEL_CONFIG = Path(
 )
 DEFAULT_WORK_ROOT = Path("results/energy_arena_work/load")
 DEFAULT_CHALLENGE_ID_ENV = "ENERGY_ARENA_LOAD_CHALLENGE_ID"
+DEFAULT_QUANTILE_COLUMNS = ["q0.025", "q0.250", "q0.500", "q0.750", "q0.975"]
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,9 @@ def build_load_submission_payload(
     challenge_id: int,
     submit: bool,
     target_tz: str,
+    objective: str,
     value_column: str,
+    quantile_columns: list[str] | None,
     approach_name: str | None,
     approach_description: str | None,
 ) -> dict:
@@ -101,8 +104,9 @@ def build_load_submission_payload(
             "forecast_date": forecast_date.isoformat(),
             "challenge_id": challenge_id,
             "target_tz": target_tz,
-            "objective": "point",
+            "objective": objective,
             "value_column": value_column,
+            "quantile_columns": quantile_columns,
             "forecast_visibility": "closed",
             "leaderboard_visibility": "public",
             "approach_name": approach_name or model_name,
@@ -122,7 +126,9 @@ def run_daily_load_energy_arena(
     target_tz: str = "Europe/Berlin",
     work_root: Path | None = None,
     submit: bool = True,
+    objective: str = "point",
     value_column: str = "Load_Model_MW",
+    quantile_columns: list[str] | None = None,
     approach_name: str | None = None,
     approach_description: str | None = None,
 ) -> DailyLoadPaths:
@@ -140,7 +146,9 @@ def run_daily_load_energy_arena(
         challenge_id=resolved_challenge_id,
         submit=submit,
         target_tz=target_tz,
+        objective=objective,
         value_column=value_column,
+        quantile_columns=quantile_columns,
         approach_name=approach_name,
         approach_description=approach_description,
     )
@@ -190,7 +198,9 @@ def run_daily_load_energy_arena_with_retries(
     target_tz: str,
     work_root: Path | None,
     submit: bool,
+    objective: str,
     value_column: str,
+    quantile_columns: list[str] | None,
     approach_name: str | None,
     approach_description: str | None,
     retry_until: datetime_time | None,
@@ -210,7 +220,9 @@ def run_daily_load_energy_arena_with_retries(
                 target_tz=target_tz,
                 work_root=work_root,
                 submit=submit,
+                objective=objective,
                 value_column=value_column,
+                quantile_columns=quantile_columns,
                 approach_name=approach_name,
                 approach_description=approach_description,
             )
@@ -238,7 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forecast-date", type=date.fromisoformat, default=None, help="Target date; defaults to tomorrow.")
     parser.add_argument("--target-tz", default="Europe/Berlin")
     parser.add_argument("--work-root", type=Path, default=None)
+    parser.add_argument("--objective", choices=["point", "quantile"], default="point")
     parser.add_argument("--value-column", default="Load_Model_MW")
+    parser.add_argument("--quantile-columns", nargs="+", default=None)
     parser.add_argument("--approach-name", default=None)
     parser.add_argument("--approach-description", default=None)
     parser.add_argument("--dry-run", action="store_true", help="Generate payloads but do not submit to Energy Arena.")
@@ -257,7 +271,9 @@ def main(argv: list[str] | None = None) -> None:
         target_tz=args.target_tz,
         work_root=args.work_root,
         submit=not args.dry_run,
+        objective=args.objective,
         value_column=args.value_column,
+        quantile_columns=args.quantile_columns or (DEFAULT_QUANTILE_COLUMNS if args.objective == "quantile" else None),
         approach_name=args.approach_name,
         approach_description=args.approach_description,
         retry_until=args.retry_until,

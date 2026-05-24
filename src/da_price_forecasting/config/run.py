@@ -18,6 +18,7 @@ class RunKind(str, Enum):
     LEAR_OPERATIONAL = "lear_operational"
     LEAR_ANC = "lear_anc"
     LOAD_FORECAST_MODEL = "load_forecast_model"
+    LOAD_FORECAST_ENSEMBLE = "load_forecast_ensemble"
     SQRA = "sqra"
     TABPFN_TS = "tabpfn_ts"
     TABPFN_LOCAL = "tabpfn_local"

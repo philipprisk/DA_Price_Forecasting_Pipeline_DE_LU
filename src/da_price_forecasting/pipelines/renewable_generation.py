@@ -26,29 +26,22 @@ from ..data.entsoe import (
     fetch_renewable_generation_forecast,
 )
 from ..data.weather import load_dwd
+from .common import (
+    as_local_day as _as_local_day,
+    load_timestamp_csv as _load_timestamp_csv,
+    point_error_stats,
+    save_timestamp_csv as _save_timestamp_csv,
+)
 
 
-def _as_local_day(value, target_tz: str) -> pd.Timestamp:
-    timestamp = pd.Timestamp(value)
-    if timestamp.tz is None:
-        timestamp = timestamp.tz_localize(target_tz)
-    else:
-        timestamp = timestamp.tz_convert(target_tz)
-    return timestamp.normalize()
-
-
-def _load_timestamp_csv(path: Path, target_tz: str) -> pd.DataFrame:
-    df = pd.read_csv(path, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True).tz_convert(target_tz)
-    df = df.sort_index()
-    df = df.loc[~df.index.duplicated(keep="last")]
-    df.index.name = "timestamp"
-    return df
-
-
-def _save_timestamp_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path)
+def _training_target_cutoff(day: pd.Timestamp, config: RenewableGenerationModelConfig) -> pd.Timestamp:
+    cutoff_day = day - pd.Timedelta(days=config.target_availability_lag_days)
+    if config.target_availability_cutoff_hour is None:
+        return cutoff_day - pd.Timedelta(minutes=15)
+    return cutoff_day + pd.Timedelta(
+        hours=config.target_availability_cutoff_hour,
+        minutes=config.target_availability_cutoff_minute,
+    )
 
 
 def _load_renewable_proxy(config: RenewableGenerationModelConfig) -> pd.DataFrame:
@@ -743,7 +736,7 @@ def rolling_renewable_generation_forecast(
     for day in forecast_days:
         day_start = time.perf_counter()
         train_start = day - pd.Timedelta(days=config.train_days_rolling)
-        train_end = day - pd.Timedelta(minutes=15)
+        train_end = _training_target_cutoff(day, config)
         test_end_ts = day + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
 
         train_mask = (dataset.index >= train_start) & (dataset.index <= train_end)
@@ -915,27 +908,22 @@ def _period_metrics(
     period: str,
     installed_capacity_mw: dict[str, float],
 ) -> dict[str, Any]:
-    valid = forecast[[pred_col, true_col]].dropna()
-    errors = valid[pred_col] - valid[true_col]
-    mse = float((errors**2).mean())
-    rmse = float(np.sqrt(mse))
-    ss_res = float((errors**2).sum())
-    ss_tot = float(((valid[true_col] - valid[true_col].mean()) ** 2).sum())
-    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+    stats = point_error_stats(forecast, pred_col, true_col)
+    rmse = float(stats["rmse"])
     capacity = _installed_capacity_for_target(pred_col, installed_capacity_mw)
     nrmse = float(rmse / capacity) if capacity is not None else np.nan
     return {
         "target": pred_col.removesuffix("_Model_MW"),
         "period": period,
-        "mae": float(errors.abs().mean()),
-        "mse": mse,
+        "mae": stats["mae"],
+        "mse": stats["mse"],
         "rmse": rmse,
         "nrmse": nrmse,
         "nrmse_pct": float(nrmse * 100.0) if pd.notna(nrmse) else np.nan,
-        "r2": r2,
-        "bias": float(errors.mean()),
+        "r2": stats["r2"],
+        "bias": stats["bias"],
         "installed_capacity_mw": float(capacity) if capacity is not None else np.nan,
-        "n_obs": int(len(valid)),
+        "n_obs": stats["n_obs"],
     }
 
 

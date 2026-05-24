@@ -179,6 +179,14 @@ class LoadForecastModelConfig(RepoConfigModel):
     bias_correction_window_days: int = 28
     bias_correction_min_observations: int = 24
     bias_correction_group: Literal["global", "hour", "mtu"] = "hour"
+    include_rolling_residual_quantiles: bool = False
+    residual_quantiles: list[float] = Field(default_factory=lambda: [0.025, 0.25, 0.50, 0.75, 0.975])
+    residual_quantile_window_days: int = 28
+    residual_quantile_min_observations: int = 20
+    residual_quantile_group: Literal["global", "hour", "mtu"] = "mtu"
+    residual_quantile_spread_scale: float = Field(default=1.0, gt=0.0)
+    quantile_evaluation_start: date | None = None
+    quantile_evaluation_end: date | None = None
 
     @field_validator("actual_load_lag_days", mode="before")
     @classmethod
@@ -322,6 +330,15 @@ class LoadForecastModelConfig(RepoConfigModel):
             return [value]
         return [str(item) for item in value]
 
+    @field_validator("residual_quantiles", mode="before")
+    @classmethod
+    def _coerce_residual_quantiles(cls, value: Any) -> list[float]:
+        if value is None:
+            return []
+        if isinstance(value, (int, float)):
+            return [float(value)]
+        return [float(item) for item in value]
+
     @model_validator(mode="after")
     def _resolve_paths(self) -> "LoadForecastModelConfig":
         if self.chunk_days < 1:
@@ -457,6 +474,17 @@ class LoadForecastModelConfig(RepoConfigModel):
             raise ValueError("bias_correction_window_days must be positive.")
         if self.bias_correction_min_observations < 1:
             raise ValueError("bias_correction_min_observations must be positive.")
+        if self.residual_quantile_window_days < 1:
+            raise ValueError("residual_quantile_window_days must be positive.")
+        if self.residual_quantile_min_observations < 1:
+            raise ValueError("residual_quantile_min_observations must be positive.")
+        if self.include_rolling_residual_quantiles:
+            if not self.residual_quantiles:
+                raise ValueError("residual_quantiles must not be empty when rolling residual quantiles are enabled.")
+            invalid_quantiles = [quantile for quantile in self.residual_quantiles if not 0.0 < quantile < 1.0]
+            if invalid_quantiles:
+                raise ValueError(f"residual_quantiles must be between 0 and 1: {invalid_quantiles}")
+            self.residual_quantiles = sorted({float(quantile) for quantile in self.residual_quantiles})
 
         self.actual_load_file = resolve_path(self.actual_load_file, self.repo_root)
         self.entsoe_load_forecast_file = resolve_path(self.entsoe_load_forecast_file, self.repo_root)
@@ -470,6 +498,76 @@ class LoadForecastModelConfig(RepoConfigModel):
             self.weather_cluster_weight_file = resolve_path(self.weather_cluster_weight_file, self.repo_root)
         if self.regional_holiday_weight_file is not None:
             self.regional_holiday_weight_file = resolve_path(self.regional_holiday_weight_file, self.repo_root)
+        return self
+
+
+class LoadForecastEnsembleSourceConfig(RepoConfigModel):
+    name: str
+    path: Path
+    weight: float = 1.0
+
+    @model_validator(mode="after")
+    def _resolve_path(self) -> "LoadForecastEnsembleSourceConfig":
+        self.path = resolve_path(self.path, self.repo_root)
+        return self
+
+
+class LoadForecastEnsembleConfig(RepoConfigModel):
+    """Blend saved load forecast files and optionally calibrate residual quantiles."""
+
+    target_tz: str = "Europe/Berlin"
+    sources: list[LoadForecastEnsembleSourceConfig] = Field(default_factory=list)
+    export_dir: Path = Path("results/load_forecast_results/load_forecast_ensemble")
+    method: Literal["mean", "median", "fixed"] = "mean"
+    test_start: date = date(2025, 12, 1)
+    test_end: date = date(2026, 2, 28)
+    target_availability_lag_days: int = 1
+
+    include_rolling_residual_quantiles: bool = False
+    residual_quantiles: list[float] = Field(default_factory=lambda: [0.025, 0.25, 0.50, 0.75, 0.975])
+    residual_quantile_window_days: int = 28
+    residual_quantile_min_observations: int = 20
+    residual_quantile_group: Literal["global", "hour", "mtu"] = "mtu"
+    residual_quantile_spread_scale: float = Field(default=1.0, gt=0.0)
+    quantile_evaluation_start: date | None = None
+    quantile_evaluation_end: date | None = None
+
+    @field_validator("residual_quantiles", mode="before")
+    @classmethod
+    def _coerce_residual_quantiles(cls, value: Any) -> list[float]:
+        if value is None:
+            return []
+        if isinstance(value, (int, float)):
+            return [float(value)]
+        return [float(item) for item in value]
+
+    @model_validator(mode="after")
+    def _resolve_paths(self) -> "LoadForecastEnsembleConfig":
+        if len(self.sources) < 2:
+            raise ValueError("Load forecast ensemble requires at least two sources.")
+        source_names = [source.name for source in self.sources]
+        if len(set(source_names)) != len(source_names):
+            raise ValueError("Load forecast ensemble source names must be unique.")
+        if self.target_availability_lag_days < 0:
+            raise ValueError("target_availability_lag_days must be non-negative.")
+        if self.residual_quantile_window_days < 1:
+            raise ValueError("residual_quantile_window_days must be positive.")
+        if self.residual_quantile_min_observations < 1:
+            raise ValueError("residual_quantile_min_observations must be positive.")
+        if self.method == "fixed":
+            weights = [source.weight for source in self.sources]
+            if any(weight < 0 for weight in weights) or sum(weights) <= 0:
+                raise ValueError("Fixed load ensemble weights must be non-negative and sum to a positive value.")
+        if self.include_rolling_residual_quantiles:
+            if not self.residual_quantiles:
+                raise ValueError("residual_quantiles must not be empty when rolling residual quantiles are enabled.")
+            invalid_quantiles = [quantile for quantile in self.residual_quantiles if not 0.0 < quantile < 1.0]
+            if invalid_quantiles:
+                raise ValueError(f"residual_quantiles must be between 0 and 1: {invalid_quantiles}")
+            self.residual_quantiles = sorted({float(quantile) for quantile in self.residual_quantiles})
+        for source in self.sources:
+            source.path = resolve_path(source.path, self.repo_root)
+        self.export_dir = resolve_path(self.export_dir, self.repo_root)
         return self
 
 

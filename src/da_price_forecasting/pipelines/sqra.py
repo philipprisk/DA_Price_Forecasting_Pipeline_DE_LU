@@ -66,6 +66,7 @@ def run_sqra_pipeline(
         train_days=config.train_days_rolling,
         quantiles=config.quantiles,
         feature_cols=feature_cols,
+        target_availability_lag_days=config.target_availability_lag_days,
     )
 
     quantile_cols = config.quantile_columns
@@ -95,6 +96,7 @@ def run_sqra_pipeline(
     payload = {
         "experiment_name": config.experiment_name,
         "train_days": config.train_days_rolling,
+        "target_availability_lag_days": config.target_availability_lag_days,
         "quantiles": config.quantiles,
         "test_start": str(pd.Timestamp(config.test_start).date()),
         "test_end": str(pd.Timestamp(config.test_end).date()),

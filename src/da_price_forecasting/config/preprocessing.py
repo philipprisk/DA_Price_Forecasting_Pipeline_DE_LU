@@ -372,6 +372,9 @@ class RenewableGenerationModelConfig(RepoConfigModel):
     target_columns: list[str] = Field(default_factory=lambda: ["Solar_Actual_MW", "Wind_Total_Actual_MW"])
     train_days_rolling: int = 112
     min_train_days: int = 14
+    target_availability_lag_days: int = 0
+    target_availability_cutoff_hour: int | None = None
+    target_availability_cutoff_minute: int = 0
     test_start: date = date(2025, 12, 1)
     test_end: date = date(2026, 2, 28)
 
@@ -389,6 +392,16 @@ class RenewableGenerationModelConfig(RepoConfigModel):
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> "RenewableGenerationModelConfig":
+        if self.train_days_rolling < 1:
+            raise ValueError("train_days_rolling must be positive.")
+        if self.min_train_days < 1:
+            raise ValueError("min_train_days must be positive.")
+        if self.target_availability_lag_days < 0:
+            raise ValueError("target_availability_lag_days must be non-negative.")
+        if self.target_availability_cutoff_hour is not None and not (0 <= self.target_availability_cutoff_hour <= 23):
+            raise ValueError("target_availability_cutoff_hour must be between 0 and 23.")
+        if self.target_availability_cutoff_minute not in {0, 15, 30, 45}:
+            raise ValueError("target_availability_cutoff_minute must be one of 0, 15, 30, or 45.")
         self.actual_generation_file = resolve_path(self.actual_generation_file, self.repo_root)
         self.renewable_proxy_file = resolve_path(self.renewable_proxy_file, self.repo_root)
         if self.renewable_proxy_fallback_file is not None:

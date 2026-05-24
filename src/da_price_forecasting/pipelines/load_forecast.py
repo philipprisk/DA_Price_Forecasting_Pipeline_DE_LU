@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -14,32 +15,18 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from ..config import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
+from ..config import EntsoeLoadForecastBenchmarkConfig, LoadForecastEnsembleConfig, LoadForecastModelConfig
 from ..data.entsoe import fetch_actual_load, fetch_load_forecast
 from ..data.weather import load_dwd, load_open_meteo
+from ..evaluation.metrics import pinball_score, quantile_column
+from .common import (
+    as_local_day as _as_local_day,
+    load_timestamp_csv as _load_timestamp_csv,
+    point_error_stats,
+    save_timestamp_csv as _save_timestamp_csv,
+)
 
-
-def _as_local_day(value: Any, target_tz: str) -> pd.Timestamp:
-    timestamp = pd.Timestamp(value)
-    if timestamp.tz is None:
-        timestamp = timestamp.tz_localize(target_tz)
-    else:
-        timestamp = timestamp.tz_convert(target_tz)
-    return timestamp.normalize()
-
-
-def _load_timestamp_csv(path: Path, target_tz: str) -> pd.DataFrame:
-    df = pd.read_csv(path, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True).tz_convert(target_tz)
-    df = df.sort_index()
-    df = df.loc[~df.index.duplicated(keep="last")]
-    df.index.name = "timestamp"
-    return df
-
-
-def _save_timestamp_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path)
+LOAD_FORECAST_REQUIRED_COLUMNS = ("Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW")
 
 
 def _calendar_window(
@@ -1471,13 +1458,15 @@ def _select_features(X_train: pd.DataFrame, y_train: pd.Series, config: LoadFore
     if max_features is None or max_features <= 0 or X_train.shape[1] <= max_features:
         return list(X_train.columns)
 
-    scores = (
-        X_train.corrwith(y_train)
-        .abs()
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-        .sort_values(ascending=False)
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
+        scores = (
+            X_train.corrwith(y_train)
+            .abs()
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+            .sort_values(ascending=False)
+        )
     selected = list(scores.head(max_features).index)
     return selected or list(X_train.columns)
 
@@ -1737,6 +1726,145 @@ def apply_rolling_bias_correction(
     return corrected
 
 
+def apply_rolling_residual_quantiles(
+    forecast: pd.DataFrame,
+    config: LoadForecastModelConfig | LoadForecastEnsembleConfig,
+    *,
+    pred_col: str = "Load_Model_MW",
+    true_col: str = "Load_Actual_MW",
+) -> pd.DataFrame:
+    """Add operational residual-calibrated quantile forecasts from past forecast errors."""
+    if not config.include_rolling_residual_quantiles:
+        return forecast
+    if pred_col not in forecast.columns or true_col not in forecast.columns:
+        raise ValueError(f"Forecast must contain {pred_col!r} and {true_col!r} for residual quantiles.")
+
+    quantiles = sorted({float(quantile) for quantile in config.residual_quantiles})
+    quantile_cols = [quantile_column(quantile) for quantile in quantiles]
+    calibrated = forecast.copy()
+    residuals = calibrated[true_col].astype(float) - calibrated[pred_col].astype(float)
+    group_values = _bias_correction_group_values(calibrated.index, config.residual_quantile_group)
+    window = pd.Timedelta(days=config.residual_quantile_window_days)
+    min_observations = config.residual_quantile_min_observations
+
+    quantile_values = pd.DataFrame(np.nan, index=calibrated.index, columns=quantile_cols, dtype=float)
+    for day in pd.DatetimeIndex(calibrated.index.normalize().unique()).sort_values():
+        cutoff = day - pd.Timedelta(days=config.target_availability_lag_days) - pd.Timedelta(minutes=15)
+        window_start = cutoff - window + pd.Timedelta(minutes=15)
+        day_mask = calibrated.index.normalize() == day
+        history_mask = (calibrated.index >= window_start) & (calibrated.index <= cutoff) & residuals.notna()
+        if not history_mask.any() or not day_mask.any():
+            continue
+
+        history_residuals = residuals.loc[history_mask]
+        global_quantiles = (
+            history_residuals.quantile(quantiles).to_dict()
+            if len(history_residuals) >= min_observations
+            else {}
+        )
+        grouped_residuals = {
+            key: values
+            for key, values in history_residuals.groupby(group_values.loc[history_mask])
+            if len(values) >= min_observations
+        }
+        grouped_quantiles = {
+            key: values.quantile(quantiles).to_dict()
+            for key, values in grouped_residuals.items()
+        }
+
+        for position in np.flatnonzero(day_mask):
+            index_value = calibrated.index[position]
+            group_key = group_values.iloc[position]
+            residual_quantiles = grouped_quantiles.get(group_key, global_quantiles)
+            if not residual_quantiles:
+                continue
+            base_prediction = float(calibrated[pred_col].iloc[position])
+            for quantile, column in zip(quantiles, quantile_cols, strict=True):
+                if quantile in residual_quantiles:
+                    quantile_values.at[index_value, column] = max(0.0, base_prediction + float(residual_quantiles[quantile]))
+
+    if quantile_cols:
+        scale = float(config.residual_quantile_spread_scale)
+        median_col = quantile_column(0.5)
+        if scale != 1.0 and median_col in quantile_values.columns:
+            median = quantile_values[median_col]
+            quantile_values.loc[:, quantile_cols] = median.to_numpy()[:, None] + scale * (
+                quantile_values[quantile_cols].sub(median, axis=0)
+            )
+            quantile_values.loc[:, quantile_cols] = quantile_values[quantile_cols].clip(lower=0.0)
+        quantile_values.loc[:, quantile_cols] = np.maximum.accumulate(
+            quantile_values[quantile_cols].to_numpy(dtype=float),
+            axis=1,
+        )
+        calibrated[quantile_cols] = quantile_values[quantile_cols]
+    return calibrated
+
+
+def _quantile_evaluation_frame(
+    forecast: pd.DataFrame,
+    config: LoadForecastModelConfig | LoadForecastEnsembleConfig,
+) -> pd.DataFrame:
+    start = config.quantile_evaluation_start or config.test_start
+    end = config.quantile_evaluation_end or config.test_end
+    start_ts = _as_local_day(start, config.target_tz)
+    end_ts = _as_local_day(end, config.target_tz) + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    return forecast.loc[(forecast.index >= start_ts) & (forecast.index <= end_ts)]
+
+
+def _quantile_period_metrics(
+    forecast: pd.DataFrame,
+    *,
+    quantiles: list[float],
+    true_col: str,
+    period: str,
+) -> dict[str, Any]:
+    quantile_cols = [quantile_column(quantile) for quantile in quantiles]
+    valid = forecast[[true_col, *quantile_cols]].dropna()
+    row: dict[str, Any] = {
+        "target": "Load",
+        "model": "RollingResidualQuantiles",
+        "period": period,
+        "lqs": np.nan,
+        "n_obs": int(len(valid)),
+    }
+    if valid.empty:
+        return row
+
+    y_true = valid[true_col].to_numpy(dtype=float)
+    losses = [
+        pinball_score(y_true, valid[quantile_column(quantile)].to_numpy(dtype=float), quantile)
+        for quantile in quantiles
+    ]
+    row["lqs"] = float(np.mean(np.vstack(losses), axis=0).mean())
+
+    if 0.5 in quantiles:
+        row["median_mae"] = float(np.abs(y_true - valid[quantile_column(0.5)].to_numpy(dtype=float)).mean())
+    for nominal, lower, upper in [(0.50, 0.25, 0.75), (0.95, 0.025, 0.975)]:
+        if lower in quantiles and upper in quantiles:
+            lower_values = valid[quantile_column(lower)].to_numpy(dtype=float)
+            upper_values = valid[quantile_column(upper)].to_numpy(dtype=float)
+            row[f"coverage_{nominal:.2f}"] = float(((y_true >= lower_values) & (y_true <= upper_values)).mean())
+    return row
+
+
+def evaluate_load_quantile_forecast(
+    forecast: pd.DataFrame,
+    quantiles: list[float],
+    *,
+    true_col: str = "Load_Actual_MW",
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    quantile_cols = [quantile_column(quantile) for quantile in quantiles]
+    if forecast.empty or true_col not in forecast.columns or any(column not in forecast.columns for column in quantile_cols):
+        return pd.DataFrame(rows)
+
+    rows.append(_quantile_period_metrics(forecast, quantiles=quantiles, true_col=true_col, period="full"))
+    month_index = forecast.index.tz_localize(None).to_period("M")
+    for month, group in forecast.groupby(month_index):
+        rows.append(_quantile_period_metrics(group, quantiles=quantiles, true_col=true_col, period=str(month)))
+    return pd.DataFrame(rows)
+
+
 def _period_metrics(
     forecast: pd.DataFrame,
     *,
@@ -1744,26 +1872,21 @@ def _period_metrics(
     true_col: str,
     period: str,
 ) -> dict[str, Any]:
-    valid = forecast[[pred_col, true_col]].dropna()
-    errors = valid[pred_col] - valid[true_col]
-    mse = float((errors**2).mean())
-    rmse = float(np.sqrt(mse))
-    ss_res = float((errors**2).sum())
-    ss_tot = float(((valid[true_col] - valid[true_col].mean()) ** 2).sum())
-    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-    mean_actual = float(valid[true_col].mean()) if not valid.empty else np.nan
+    stats = point_error_stats(forecast, pred_col, true_col)
+    mean_actual = float(stats["mean_actual_mw"])
+    rmse = float(stats["rmse"])
     return {
         "target": "Load",
         "model": pred_col.removeprefix("Load_").removesuffix("_MW"),
         "period": period,
-        "mae": float(errors.abs().mean()),
-        "mse": mse,
+        "mae": stats["mae"],
+        "mse": stats["mse"],
         "rmse": rmse,
-        "r2": r2,
+        "r2": stats["r2"],
         "nrmse_mean_load_pct": float(rmse / mean_actual * 100.0) if mean_actual > 0 else np.nan,
-        "bias": float(errors.mean()),
+        "bias": stats["bias"],
         "mean_actual_mw": mean_actual,
-        "n_obs": int(len(valid)),
+        "n_obs": stats["n_obs"],
     }
 
 
@@ -1797,44 +1920,33 @@ def evaluate_load_forecast(
 
 def _load_model_forecast_csv(path: Path, target_tz: str) -> pd.DataFrame:
     frame = _load_timestamp_csv(path, target_tz)
-    required_columns = {"Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"}
-    missing = required_columns - set(frame.columns)
+    missing = set(LOAD_FORECAST_REQUIRED_COLUMNS) - set(frame.columns)
     if missing:
         raise ValueError(f"Load forecast file {path} is missing required columns: {sorted(missing)}")
-    return frame[list(required_columns)].sort_index()
+    return frame[list(LOAD_FORECAST_REQUIRED_COLUMNS)].sort_index()
 
 
-def build_rolling_load_residual_ensemble(
+def build_load_point_ensemble(
     source_forecasts: dict[str, pd.DataFrame],
     *,
-    train_days: int = 28,
-    min_train_days: int = 7,
-    target_availability_lag_days: int = 1,
-    weight_grid: list[float] | None = None,
-    shrink_grid: list[float] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Blend two residual-correction load forecasts using only past available errors."""
-    if len(source_forecasts) != 2:
-        raise ValueError("Rolling load residual ensemble currently expects exactly two source forecasts.")
-    if train_days < 1:
-        raise ValueError("train_days must be positive.")
-    if min_train_days < 1:
-        raise ValueError("min_train_days must be positive.")
-    if target_availability_lag_days < 0:
-        raise ValueError("target_availability_lag_days must be non-negative.")
+    method: str = "mean",
+    weights: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """Blend saved load point forecasts on their common timestamps."""
+    if len(source_forecasts) < 2:
+        raise ValueError("Load point ensemble requires at least two source forecasts.")
+    if method not in {"mean", "median", "fixed"}:
+        raise ValueError(f"Unsupported load ensemble method: {method!r}")
 
-    weight_grid = weight_grid or [round(value, 2) for value in np.linspace(0.0, 1.0, 11)]
-    shrink_grid = shrink_grid or [0.75, 0.9, 1.0, 1.1]
     source_names = list(source_forecasts)
-    joined_parts = []
+    joined_parts: list[pd.DataFrame] = []
     for name, forecast in source_forecasts.items():
-        required_columns = {"Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"}
-        missing = required_columns - set(forecast.columns)
+        missing = set(LOAD_FORECAST_REQUIRED_COLUMNS) - set(forecast.columns)
         if missing:
             raise ValueError(f"Source forecast {name!r} is missing required columns: {sorted(missing)}")
-        part = forecast[["Load_Model_MW", "Load_Benchmark_MW", "Load_Actual_MW"]].rename(
+        part = forecast[list(LOAD_FORECAST_REQUIRED_COLUMNS)].rename(
             columns={
-                "Load_Model_MW": f"Load_Model_MW_{name}",
+                "Load_Model_MW": f"Load_Source_{name}_MW",
                 "Load_Benchmark_MW": f"Load_Benchmark_MW_{name}",
                 "Load_Actual_MW": f"Load_Actual_MW_{name}",
             }
@@ -1842,80 +1954,52 @@ def build_rolling_load_residual_ensemble(
         joined_parts.append(part)
 
     joined = pd.concat(joined_parts, axis=1, join="inner").sort_index()
-    benchmark_cols = [f"Load_Benchmark_MW_{name}" for name in source_names]
-    actual_cols = [f"Load_Actual_MW_{name}" for name in source_names]
-    benchmark = joined[benchmark_cols[0]].copy()
-    actual = joined[actual_cols[0]].copy()
-    for column in benchmark_cols[1:]:
+    source_columns = [f"Load_Source_{name}_MW" for name in source_names]
+    benchmark_columns = [f"Load_Benchmark_MW_{name}" for name in source_names]
+    actual_columns = [f"Load_Actual_MW_{name}" for name in source_names]
+
+    benchmark = joined[benchmark_columns[0]].copy()
+    actual = joined[actual_columns[0]].copy()
+    for column in benchmark_columns[1:]:
         if not np.allclose(benchmark.to_numpy(dtype=float), joined[column].to_numpy(dtype=float), equal_nan=True):
             raise ValueError("Source forecasts have different Load_Benchmark_MW values.")
-    for column in actual_cols[1:]:
+    for column in actual_columns[1:]:
         if not np.allclose(actual.to_numpy(dtype=float), joined[column].to_numpy(dtype=float), equal_nan=True):
             raise ValueError("Source forecasts have different Load_Actual_MW values.")
 
-    residual_columns = []
-    for name in source_names:
-        column = f"Load_Model_Residual_MW_{name}"
-        joined[column] = joined[f"Load_Model_MW_{name}"] - benchmark
-        residual_columns.append(column)
+    source_values = joined[source_columns].to_numpy(dtype=float)
+    if method == "median":
+        prediction = np.nanmedian(source_values, axis=1)
+    elif method == "fixed":
+        if weights is None:
+            raise ValueError("Fixed load ensemble requires source weights.")
+        weight_values = np.array([float(weights.get(name, 0.0)) for name in source_names], dtype=float)
+        if np.any(weight_values < 0) or weight_values.sum() <= 0:
+            raise ValueError("Fixed load ensemble weights must be non-negative and sum to a positive value.")
+        prediction = np.average(source_values, axis=1, weights=weight_values)
+    else:
+        prediction = np.nanmean(source_values, axis=1)
 
-    daily_index = joined.index.normalize()
-    forecast_parts: list[pd.DataFrame] = []
-    calibration_rows: list[dict[str, Any]] = []
-    fallback_weight = 0.5
-    fallback_shrink = 1.0
-
-    for day in pd.DatetimeIndex(daily_index.unique()).sort_values():
-        train_start = day - pd.Timedelta(days=train_days)
-        train_end = day - pd.Timedelta(days=target_availability_lag_days) - pd.Timedelta(minutes=15)
-        train_mask = (joined.index >= train_start) & (joined.index <= train_end)
-        test_mask = daily_index == day
-        train_days_available = joined.index[train_mask].normalize().nunique()
-
-        best_weight = fallback_weight
-        best_shrink = fallback_shrink
-        best_rmse = np.nan
-        if train_days_available >= min_train_days and train_mask.any():
-            y_train = actual.loc[train_mask].to_numpy(dtype=float)
-            benchmark_train = benchmark.loc[train_mask].to_numpy(dtype=float)
-            residual_train = joined.loc[train_mask, residual_columns].to_numpy(dtype=float)
-            for weight in weight_grid:
-                weights = np.array([float(weight), 1.0 - float(weight)], dtype=float)
-                blended_residual = residual_train @ weights
-                for shrink in shrink_grid:
-                    prediction = benchmark_train + float(shrink) * blended_residual
-                    errors = prediction - y_train
-                    rmse = float(np.sqrt(np.mean(errors**2)))
-                    if not np.isfinite(best_rmse) or rmse < best_rmse:
-                        best_rmse = rmse
-                        best_weight = float(weight)
-                        best_shrink = float(shrink)
-
-        residual_test = joined.loc[test_mask, residual_columns].to_numpy(dtype=float)
-        day_weights = np.array([best_weight, 1.0 - best_weight], dtype=float)
-        prediction = benchmark.loc[test_mask].to_numpy(dtype=float) + best_shrink * (residual_test @ day_weights)
-        day_forecast = pd.DataFrame(index=joined.index[test_mask])
-        day_forecast["Load_Model_MW"] = np.clip(prediction, 0.0, None)
-        day_forecast["Load_Benchmark_MW"] = benchmark.loc[test_mask]
-        day_forecast["Load_Actual_MW"] = actual.loc[test_mask]
-        for name in source_names:
-            day_forecast[f"Load_Source_{name}_MW"] = joined.loc[test_mask, f"Load_Model_MW_{name}"]
-        forecast_parts.append(day_forecast)
-        calibration_rows.append(
-            {
-                "forecast_day": day,
-                "train_days_available": int(train_days_available),
-                "train_rmse": best_rmse,
-                f"weight_{source_names[0]}": best_weight,
-                f"weight_{source_names[1]}": 1.0 - best_weight,
-                "residual_shrink": best_shrink,
-            }
-        )
-
-    forecast = pd.concat(forecast_parts).sort_index()
+    forecast = pd.DataFrame(index=joined.index)
+    forecast["Load_Model_MW"] = np.clip(prediction, 0.0, None)
+    forecast["Load_Benchmark_MW"] = benchmark
+    forecast["Load_Actual_MW"] = actual
+    for column in source_columns:
+        forecast[column] = joined[column]
     forecast.index.name = "timestamp"
-    calibration = pd.DataFrame(calibration_rows)
-    return forecast, calibration
+    return forecast.sort_index()
+
+
+def build_load_forecast_ensemble(config: LoadForecastEnsembleConfig) -> pd.DataFrame:
+    source_forecasts = {
+        source.name: _load_model_forecast_csv(source.path, config.target_tz)
+        for source in config.sources
+    }
+    weights = {source.name: source.weight for source in config.sources}
+    forecast = build_load_point_ensemble(source_forecasts, method=config.method, weights=weights)
+    start = _as_local_day(config.test_start, config.target_tz)
+    end = _as_local_day(config.test_end, config.target_tz) + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    return forecast.loc[(forecast.index >= start) & (forecast.index <= end)]
 
 
 def build_entsoe_load_forecast_benchmark(
@@ -1963,6 +2047,47 @@ def run_entsoe_load_forecast_benchmark(
     }
 
 
+def run_load_forecast_ensemble_pipeline(
+    config: LoadForecastEnsembleConfig,
+    *,
+    save_outputs: bool = True,
+) -> dict[str, pd.DataFrame]:
+    print("\n--- Building Load Forecast Ensemble ---")
+    forecast = build_load_forecast_ensemble(config)
+    forecast = apply_rolling_residual_quantiles(forecast, config)
+    metrics = evaluate_load_forecast(forecast)
+    quantile_metrics = (
+        evaluate_load_quantile_forecast(
+            _quantile_evaluation_frame(forecast, config),
+            config.residual_quantiles,
+        )
+        if config.include_rolling_residual_quantiles
+        else pd.DataFrame()
+    )
+
+    print("\n--- Load Forecast Ensemble Metrics ---")
+    print(metrics.to_string(index=False))
+    if not quantile_metrics.empty:
+        print("\n--- Load Ensemble Quantile Forecast Metrics ---")
+        print(quantile_metrics.to_string(index=False))
+
+    if save_outputs:
+        config.export_dir.mkdir(parents=True, exist_ok=True)
+        forecast.to_csv(config.export_dir / "forecast.csv")
+        metrics.to_csv(config.export_dir / "metrics.csv", index=False)
+        if not quantile_metrics.empty:
+            quantile_metrics.to_csv(config.export_dir / "quantile_metrics.csv", index=False)
+        with (config.export_dir / "config.json").open("w", encoding="utf-8") as handle:
+            json.dump(config.model_dump(mode="json"), handle, indent=2)
+        print(f"Saved load forecast ensemble outputs -> {config.export_dir}")
+
+    return {
+        "forecast": forecast,
+        "metrics": metrics,
+        "quantile_metrics": quantile_metrics,
+    }
+
+
 def run_load_forecast_pipeline(
     config: LoadForecastModelConfig,
     *,
@@ -1982,15 +2107,29 @@ def run_load_forecast_pipeline(
     print("\n--- Rolling Direct Load Forecast ---")
     forecast, runtime = rolling_load_forecast(dataset, config)
     forecast = apply_rolling_bias_correction(forecast, config)
+    forecast = apply_rolling_residual_quantiles(forecast, config)
     metrics = evaluate_load_forecast(forecast)
+    quantile_metrics = (
+        evaluate_load_quantile_forecast(
+            _quantile_evaluation_frame(forecast, config),
+            config.residual_quantiles,
+        )
+        if config.include_rolling_residual_quantiles
+        else pd.DataFrame()
+    )
     print("\n--- Load Forecast Metrics ---")
     print(metrics.to_string(index=False))
+    if not quantile_metrics.empty:
+        print("\n--- Load Quantile Forecast Metrics ---")
+        print(quantile_metrics.to_string(index=False))
 
     if save_outputs:
         config.export_dir.mkdir(parents=True, exist_ok=True)
         forecast.to_csv(config.export_dir / "forecast.csv")
         runtime.to_csv(config.export_dir / "runtime.csv", index=False)
         metrics.to_csv(config.export_dir / "metrics.csv", index=False)
+        if not quantile_metrics.empty:
+            quantile_metrics.to_csv(config.export_dir / "quantile_metrics.csv", index=False)
         with (config.export_dir / "config.json").open("w", encoding="utf-8") as handle:
             json.dump(config.model_dump(mode="json"), handle, indent=2)
         print(f"Saved load forecast outputs -> {config.export_dir}")
@@ -2000,4 +2139,5 @@ def run_load_forecast_pipeline(
         "forecast": forecast,
         "runtime": runtime,
         "metrics": metrics,
+        "quantile_metrics": quantile_metrics,
     }

@@ -314,6 +314,13 @@ pixi run energy-arena-load-open-meteo-daily --dry-run --forecast-date 2026-05-23
 pixi run energy-arena-load-open-meteo-daily --retry-until 11:55 --retry-interval-minutes 5
 ```
 
+For the probabilistic load challenge, set `ENERGY_ARENA_LOAD_QUANTILE_CHALLENGE_ID` in `.env` and use the quantile task. It runs the quantile-capable load config and submits the residual-calibrated quantiles `q0.025`, `q0.250`, `q0.500`, `q0.750`, and `q0.975`:
+
+```bash
+pixi run energy-arena-load-open-meteo-quantile-daily --dry-run --forecast-date 2026-05-23
+pixi run energy-arena-load-open-meteo-quantile-daily --retry-until 11:55 --retry-interval-minutes 5
+```
+
 On the VM, create a user-level timer that refreshes the DWD archive before the load submission. This service retries on failure so it can wait for DWD to publish the live files:
 
 ```bash
@@ -422,6 +429,37 @@ Inspect Open-Meteo load logs with:
 
 ```bash
 journalctl --user -u energy-arena-load-open-meteo-daily.service -f
+```
+
+To deploy the probabilistic Open-Meteo load submission as a separate timer, use the quantile task and a separate challenge id in `.env`:
+
+```bash
+cat > ~/.config/systemd/user/energy-arena-load-open-meteo-quantile-daily.service <<'EOF'
+[Unit]
+Description=Daily Energy Arena Open-Meteo load quantile forecast submission
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DA_Price_Forecasting_Pipeline_DE_LU
+ExecStart=%h/.pixi/bin/pixi run energy-arena-load-open-meteo-quantile-daily --retry-until 11:55 --retry-interval-minutes 5
+EOF
+
+cat > ~/.config/systemd/user/energy-arena-load-open-meteo-quantile-daily.timer <<'EOF'
+[Unit]
+Description=Run Energy Arena Open-Meteo load quantile submission daily at 11:40 Europe/Berlin
+
+[Timer]
+OnCalendar=*-*-* 11:40:00
+Persistent=true
+Unit=energy-arena-load-open-meteo-quantile-daily.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now energy-arena-load-open-meteo-quantile-daily.timer
+systemctl --user list-timers energy-arena-load-open-meteo-quantile-daily.timer
 ```
 
 For data/results transfer, use `rsync` from your local machine:

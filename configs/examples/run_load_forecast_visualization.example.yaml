@@ -1,0 +1,35 @@
+kind: visualization_report
+config:
+  repo_root: "."
+  output_dir: output/figures/load_forecast
+  mae_table:
+    enabled: false
+  runtime_table:
+    enabled: false
+  probabilistic_forecast:
+    enabled: false
+  load_forecast_plot:
+    enabled: true
+    forecast_path: results/load_forecast_results/current_best/forecast.csv
+    output: output/figures/load_forecast/load_forecast_comparison
+    formats:
+      - png
+      - pdf
+    start: "2026-05-15T00:00:00+02:00"
+    end: "2026-05-22T23:45:00+02:00"
+    actual_col: Load_Actual_MW
+    model_col: Load_Model_MW
+    benchmark_col: Load_Benchmark_MW
+    actual_label: Actual load
+    model_label: Model forecast
+    benchmark_label: ENTSO-E forecast
+    title: Load Forecast Comparison
+    ylabel: Load [MW]
+    dpi: 300
+    show: false
+  anc_bars:
+    enabled: false
+  anc_heatmaps:
+    enabled: false
+  evaluation_report:
+    enabled: false

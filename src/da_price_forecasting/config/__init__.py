@@ -25,7 +25,12 @@ from .exaa_naive import ExaaNaiveConfig
 from .forecast_ensemble import ForecastEnsembleConfig, ForecastEnsembleSourceConfig
 from .features import CommodityConfig, CommodityInstrumentConfig, CovariateConfig, CovariateName
 from .lear import LearAncConfig, LearOperationalConfig
-from .load_forecast import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
+from .load_forecast import (
+    EntsoeLoadForecastBenchmarkConfig,
+    LoadForecastEnsembleConfig,
+    LoadForecastEnsembleSourceConfig,
+    LoadForecastModelConfig,
+)
 from .preprocessing import (
     EntsoeRenewableForecastBenchmarkConfig,
     Era5AggregationConfig,
@@ -56,6 +61,7 @@ from .visualization import (
     VisualizationAncHeatmapConfig,
     VisualizationArtifactTableConfig,
     VisualizationEvaluationReportConfig,
+    VisualizationLoadForecastPlotConfig,
     VisualizationProbForecastConfig,
     VisualizationReportConfig,
 )
@@ -88,6 +94,8 @@ __all__ = [
     "CovariateName",
     "LearAncConfig",
     "LoadForecastModelConfig",
+    "LoadForecastEnsembleConfig",
+    "LoadForecastEnsembleSourceConfig",
     "LoadForecastModelEnergyArenaSource",
     "LearOperationalConfig",
     "LearOperationalEnergyArenaSource",
@@ -112,6 +120,7 @@ __all__ = [
     "VisualizationAncHeatmapConfig",
     "VisualizationArtifactTableConfig",
     "VisualizationEvaluationReportConfig",
+    "VisualizationLoadForecastPlotConfig",
     "VisualizationProbForecastConfig",
     "VisualizationReportConfig",
     "WeatherSource",

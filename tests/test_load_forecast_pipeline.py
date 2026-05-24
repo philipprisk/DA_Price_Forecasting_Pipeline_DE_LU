@@ -6,7 +6,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from da_price_forecasting.config import EntsoeLoadForecastBenchmarkConfig, LoadForecastModelConfig
+from da_price_forecasting.config import (
+    EntsoeLoadForecastBenchmarkConfig,
+    LoadForecastEnsembleConfig,
+    LoadForecastModelConfig,
+)
 from da_price_forecasting.pipelines import load_forecast as lf
 
 
@@ -675,42 +679,85 @@ def test_rolling_bias_correction_handles_duplicate_timestamps(tmp_path: Path) ->
     assert corrected["Load_Model_BiasCorrected_MW"].notna().all()
 
 
-def test_rolling_load_residual_ensemble_uses_only_available_history() -> None:
-    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=12 * 96, freq="15min")
-    benchmark = pd.Series(50_000.0, index=index)
-    actual = pd.Series(50_000.0, index=index)
-    source_a = pd.DataFrame(
+def test_rolling_residual_quantiles_use_only_past_errors(tmp_path: Path) -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=5 * 96, freq="15min")
+    day_number = (index.normalize() - index.normalize()[0]).days + 1
+    forecast = pd.DataFrame(
         {
-            "Load_Model_MW": benchmark + 100.0,
-            "Load_Benchmark_MW": benchmark,
-            "Load_Actual_MW": actual,
+            "Load_Model_MW": np.full(len(index), 100.0),
+            "Load_Actual_MW": 100.0 + day_number * 10.0,
         },
         index=index,
     )
-    source_b = pd.DataFrame(
-        {
-            "Load_Model_MW": benchmark + 500.0,
-            "Load_Benchmark_MW": benchmark,
-            "Load_Actual_MW": actual,
-        },
-        index=index,
-    )
-    # Make source B look artificially perfect on D-1. A D forecast may not use that day's actual errors.
-    d_minus_1 = index.normalize() == pd.Timestamp("2026-01-09T00:00:00+01:00")
-    source_b.loc[d_minus_1, "Load_Model_MW"] = source_b.loc[d_minus_1, "Load_Actual_MW"]
-
-    forecast, calibration = lf.build_rolling_load_residual_ensemble(
-        {"a": source_a.loc["2026-01-01":"2026-01-10"], "b": source_b.loc["2026-01-01":"2026-01-10"]},
-        train_days=7,
-        min_train_days=2,
+    config = _config(
+        tmp_path,
+        include_rolling_residual_quantiles=True,
+        residual_quantiles=[0.25, 0.5, 0.75],
+        residual_quantile_group="global",
+        residual_quantile_window_days=3,
+        residual_quantile_min_observations=1,
         target_availability_lag_days=1,
-        weight_grid=[0.0, 1.0],
-        shrink_grid=[1.0],
     )
 
-    row = calibration.loc[calibration["forecast_day"].eq(pd.Timestamp("2026-01-10T00:00:00+01:00"))].iloc[0]
-    assert row["weight_a"] == 1.0
-    assert np.isclose(forecast.loc[pd.Timestamp("2026-01-10T12:00:00+01:00"), "Load_Model_MW"], 50_100.0)
+    result = lf.apply_rolling_residual_quantiles(forecast, config)
+
+    first_day = pd.Timestamp("2026-01-01T12:00:00+01:00")
+    target = pd.Timestamp("2026-01-04T12:00:00+01:00")
+    assert np.isnan(result.loc[first_day, "q0.500"])
+    assert result.loc[target, "q0.500"] == 115.0
+    assert result.loc[target, "q0.250"] <= result.loc[target, "q0.500"] <= result.loc[target, "q0.750"]
+
+
+def test_rolling_residual_quantiles_can_scale_spread(tmp_path: Path) -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=5 * 96, freq="15min")
+    day_number = (index.normalize() - index.normalize()[0]).days + 1
+    forecast = pd.DataFrame(
+        {
+            "Load_Model_MW": np.full(len(index), 100.0),
+            "Load_Actual_MW": 100.0 + day_number * 10.0,
+        },
+        index=index,
+    )
+    config = _config(
+        tmp_path,
+        include_rolling_residual_quantiles=True,
+        residual_quantiles=[0.25, 0.5, 0.75],
+        residual_quantile_group="global",
+        residual_quantile_window_days=3,
+        residual_quantile_min_observations=1,
+        residual_quantile_spread_scale=2.0,
+        target_availability_lag_days=1,
+    )
+
+    result = lf.apply_rolling_residual_quantiles(forecast, config)
+    target = pd.Timestamp("2026-01-04T12:00:00+01:00")
+
+    assert result.loc[target, "q0.500"] == 115.0
+    assert result.loc[target, "q0.250"] == 105.0
+    assert result.loc[target, "q0.750"] == 125.0
+
+
+def test_evaluate_load_quantile_forecast_reports_lqs_and_coverage() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=4, freq="15min")
+    forecast = pd.DataFrame(
+        {
+            "Load_Actual_MW": [10.0, 20.0, 30.0, 40.0],
+            "q0.025": [0.0, 10.0, 20.0, 30.0],
+            "q0.250": [5.0, 15.0, 25.0, 35.0],
+            "q0.500": [10.0, 20.0, 30.0, 40.0],
+            "q0.750": [15.0, 25.0, 35.0, 45.0],
+            "q0.975": [20.0, 30.0, 40.0, 50.0],
+        },
+        index=index,
+    )
+
+    metrics = lf.evaluate_load_quantile_forecast(forecast, [0.025, 0.25, 0.5, 0.75, 0.975])
+    full = metrics.loc[metrics["period"].eq("full")].iloc[0]
+
+    assert full["lqs"] >= 0.0
+    assert full["coverage_0.50"] == 1.0
+    assert full["coverage_0.95"] == 1.0
+    assert full["median_mae"] == 0.0
 
 
 def test_rolling_load_forecast_outputs_complete_day(tmp_path: Path) -> None:
@@ -733,6 +780,79 @@ def test_rolling_load_forecast_outputs_complete_day(tmp_path: Path) -> None:
     assert forecast.columns.tolist() == ["Load_Model_MW", "Load_Actual_MW"]
     assert forecast["Load_Model_MW"].notna().all()
     assert runtime.loc[0, "train_rows"] >= 2 * 96
+
+
+def test_build_load_point_ensemble_averages_sources() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=4, freq="15min")
+    actual = pd.Series([10.0, 20.0, 30.0, 40.0], index=index)
+    benchmark = actual + 1.0
+    source_a = pd.DataFrame(
+        {
+            "Load_Model_MW": actual + 2.0,
+            "Load_Benchmark_MW": benchmark,
+            "Load_Actual_MW": actual,
+        },
+        index=index,
+    )
+    source_b = pd.DataFrame(
+        {
+            "Load_Model_MW": actual + 6.0,
+            "Load_Benchmark_MW": benchmark,
+            "Load_Actual_MW": actual,
+        },
+        index=index,
+    )
+
+    forecast = lf.build_load_point_ensemble({"a": source_a, "b": source_b}, method="mean")
+
+    assert forecast["Load_Model_MW"].tolist() == [14.0, 24.0, 34.0, 44.0]
+    assert forecast["Load_Source_a_MW"].tolist() == [12.0, 22.0, 32.0, 42.0]
+    assert forecast["Load_Source_b_MW"].tolist() == [16.0, 26.0, 36.0, 46.0]
+
+
+def test_load_forecast_ensemble_pipeline_adds_residual_quantiles(tmp_path: Path) -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=5 * 96, freq="15min")
+    day_number = (index.normalize() - index.normalize()[0]).days + 1
+    actual = pd.Series(100.0 + day_number * 10.0, index=index)
+    benchmark = pd.Series(100.0, index=index)
+    source_a = pd.DataFrame(
+        {
+            "Load_Model_MW": np.full(len(index), 100.0),
+            "Load_Benchmark_MW": benchmark,
+            "Load_Actual_MW": actual,
+        },
+        index=index,
+    )
+    source_b = source_a.copy()
+    source_b["Load_Model_MW"] = 102.0
+    source_a.to_csv(tmp_path / "source_a.csv")
+    source_b.to_csv(tmp_path / "source_b.csv")
+    config = LoadForecastEnsembleConfig(
+        repo_root=tmp_path,
+        sources=[
+            {"name": "a", "path": tmp_path / "source_a.csv"},
+            {"name": "b", "path": tmp_path / "source_b.csv"},
+        ],
+        export_dir=tmp_path / "ensemble",
+        method="mean",
+        test_start=date(2026, 1, 1),
+        test_end=date(2026, 1, 5),
+        include_rolling_residual_quantiles=True,
+        residual_quantiles=[0.25, 0.5, 0.75],
+        residual_quantile_group="global",
+        residual_quantile_window_days=3,
+        residual_quantile_min_observations=1,
+        quantile_evaluation_start=date(2026, 1, 4),
+        quantile_evaluation_end=date(2026, 1, 5),
+        target_availability_lag_days=1,
+    )
+
+    result = lf.run_load_forecast_ensemble_pipeline(config, save_outputs=False)
+
+    forecast = result["forecast"]
+    assert forecast.loc[pd.Timestamp("2026-01-01T00:00:00+01:00"), "Load_Model_MW"] == 101.0
+    assert "q0.500" in forecast.columns
+    assert not result["quantile_metrics"].empty
 
 
 def test_rolling_load_forecast_predicts_future_day_without_actual_target(tmp_path: Path) -> None:

@@ -31,7 +31,9 @@ def test_load_daily_payload_uses_load_forecast_source() -> None:
         challenge_id=42,
         submit=False,
         target_tz="Europe/Berlin",
+        objective="point",
         value_column="Load_Model_MW",
+        quantile_columns=None,
         approach_name=None,
         approach_description=None,
     )
@@ -40,7 +42,30 @@ def test_load_daily_payload_uses_load_forecast_source() -> None:
     assert payload["config"]["forecast_date"] == "2026-05-16"
     assert payload["config"]["challenge_id"] == 42
     assert payload["config"]["source"]["kind"] == "load_forecast_model"
+    assert payload["config"]["objective"] == "point"
     assert payload["config"]["value_column"] == "Load_Model_MW"
+    validate_config_payload(payload, RunConfig, repo_root=Path.cwd())
+
+
+def test_load_daily_payload_can_target_quantile_challenge() -> None:
+    payload = build_load_submission_payload(
+        model_config_path=Path(
+            "configs/load_forecast_hybrid_entsoe_residual_open_meteo_p10_morning1015_daily_weather_hgb_smooth_mar_may22_tw224_f140_weather_spread_broad_f160_rq_global_w84_s105.yaml"
+        ),
+        forecast_date=date(2026, 5, 16),
+        challenge_id=43,
+        submit=False,
+        target_tz="Europe/Berlin",
+        objective="quantile",
+        value_column="Load_Model_MW",
+        quantile_columns=["q0.025", "q0.250", "q0.500", "q0.750", "q0.975"],
+        approach_name="load_quantile",
+        approach_description=None,
+    )
+
+    assert payload["config"]["challenge_id"] == 43
+    assert payload["config"]["objective"] == "quantile"
+    assert payload["config"]["quantile_columns"] == ["q0.025", "q0.250", "q0.500", "q0.750", "q0.975"]
     validate_config_payload(payload, RunConfig, repo_root=Path.cwd())
 
 

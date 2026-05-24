@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pandas as pd
 
 from ..config import (
@@ -13,6 +14,7 @@ from ..config import (
     VisualizationAncHeatmapConfig,
     VisualizationArtifactTableConfig,
     VisualizationEvaluationReportConfig,
+    VisualizationLoadForecastPlotConfig,
     VisualizationProbForecastConfig,
     VisualizationReportConfig,
 )
@@ -298,6 +300,115 @@ def _save_figure(
     return output_paths
 
 
+def _save_figure_from_section(
+    fig,
+    *,
+    output: Path | None,
+    default_dir: Path,
+    stem: str,
+    formats: list[str],
+    dpi: int,
+    show: bool,
+) -> list[Path]:
+    if output is None:
+        return _save_figure(fig, default_dir, stem, formats, dpi, show)
+    if output.suffix == "":
+        return _save_figure(fig, output.parent, output.name, formats, dpi, show)
+
+    import matplotlib.pyplot as plt
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return [output]
+
+
+def _run_load_forecast_plot(
+    config: VisualizationReportConfig,
+    section: VisualizationLoadForecastPlotConfig,
+) -> list[Path]:
+    _apply_evaluation_style()
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+
+    forecast = _load_panel_csv(section.forecast_path)
+    forecast = _filter_time_window(forecast, section.start, section.end)
+    required_cols = [section.actual_col, section.model_col]
+    if section.benchmark_col is not None:
+        required_cols.append(section.benchmark_col)
+    missing = [column for column in required_cols if column not in forecast.columns]
+    if missing:
+        raise ValueError(f"Load forecast plot is missing required columns: {missing}")
+
+    fig, ax = plt.subplots(figsize=(13.5, 5.6))
+    if section.benchmark_col is not None:
+        ax.plot(
+            forecast.index,
+            forecast[section.benchmark_col],
+            color="#8b949e",
+            linewidth=1.2,
+            label=section.benchmark_label,
+            alpha=0.9,
+            zorder=2,
+        )
+    ax.plot(
+        forecast.index,
+        forecast[section.model_col],
+        color="#2f80ed",
+        linewidth=1.35,
+        label=section.model_label,
+        zorder=3,
+    )
+    ax.plot(
+        forecast.index,
+        forecast[section.actual_col],
+        color="#111111",
+        linewidth=1.45,
+        linestyle=(0, (3, 2)),
+        label=section.actual_label,
+        zorder=4,
+    )
+
+    model_rmse = _rmse(forecast[section.model_col], forecast[section.actual_col])
+    title = section.title
+    if section.benchmark_col is not None:
+        benchmark_rmse = _rmse(forecast[section.benchmark_col], forecast[section.actual_col])
+        title = f"{title}  |  RMSE: model {model_rmse:,.0f} MW vs ENTSO-E {benchmark_rmse:,.0f} MW"
+    else:
+        title = f"{title}  |  RMSE: {model_rmse:,.0f} MW"
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.set_ylabel(section.ylabel)
+    ax.set_xlabel("")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda value, _: f"{value:,.0f}"))
+    ax.grid(True, axis="both")
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=9))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m", tz=forecast.index.tz))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.12), ncol=3, frameon=False)
+    fig.autofmt_xdate(rotation=45, ha="right")
+    fig.tight_layout()
+    return _save_figure_from_section(
+        fig,
+        output=section.output,
+        default_dir=config.output_dir,
+        stem="load_forecast_comparison",
+        formats=section.formats,
+        dpi=section.dpi,
+        show=section.show,
+    )
+
+
+def _rmse(prediction: pd.Series, actual: pd.Series) -> float:
+    valid = pd.concat([prediction, actual], axis=1).dropna()
+    if valid.empty:
+        return float("nan")
+    errors = valid.iloc[:, 0].to_numpy(dtype=float) - valid.iloc[:, 1].to_numpy(dtype=float)
+    return float(np.sqrt(np.mean(errors**2)))
+
+
 def _plot_point_forecast(section: VisualizationEvaluationReportConfig, output_dir: Path) -> list[Path]:
     _apply_evaluation_style()
     import matplotlib.dates as mdates
@@ -559,6 +670,9 @@ def run_visualization_report(config: VisualizationReportConfig) -> list[Path]:
 
     if config.probabilistic_forecast is not None and config.probabilistic_forecast.enabled:
         generated.extend(_run_prob_forecast(config, config.probabilistic_forecast))
+
+    if config.load_forecast_plot is not None and config.load_forecast_plot.enabled:
+        generated.extend(_run_load_forecast_plot(config, config.load_forecast_plot))
 
     if config.anc_bars is not None and config.anc_bars.enabled:
         generated.extend(_run_anc_bars(config, config.anc_bars))

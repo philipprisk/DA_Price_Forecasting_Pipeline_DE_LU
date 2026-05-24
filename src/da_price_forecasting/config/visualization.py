@@ -24,6 +24,32 @@ class VisualizationProbForecastConfig(BaseModel):
     show: bool = False
 
 
+class VisualizationLoadForecastPlotConfig(BaseModel):
+    enabled: bool = False
+    forecast_path: Path = Path("results/load_forecast_results/current_best/forecast.csv")
+    output: Path | None = None
+    formats: list[str] = Field(default_factory=lambda: ["png", "pdf"])
+    start: str | None = None
+    end: str | None = None
+    actual_col: str = "Load_Actual_MW"
+    model_col: str = "Load_Model_MW"
+    benchmark_col: str | None = "Load_Benchmark_MW"
+    actual_label: str = "Actual load"
+    model_label: str = "Model forecast"
+    benchmark_label: str = "ENTSO-E forecast"
+    title: str = "Load Forecast Comparison"
+    ylabel: str = "Load [MW]"
+    dpi: int = 300
+    show: bool = False
+
+    @model_validator(mode="after")
+    def _normalise_options(self) -> "VisualizationLoadForecastPlotConfig":
+        self.formats = [fmt.removeprefix(".").lower() for fmt in self.formats]
+        if not self.formats:
+            raise ValueError("Load forecast plot requires at least one output format.")
+        return self
+
+
 class VisualizationAncBarConfig(BaseModel):
     enabled: bool = False
     fundamental_csv: Path | None = None
@@ -79,6 +105,9 @@ class VisualizationReportConfig(RepoConfigModel):
     probabilistic_forecast: VisualizationProbForecastConfig | None = Field(
         default_factory=VisualizationProbForecastConfig
     )
+    load_forecast_plot: VisualizationLoadForecastPlotConfig | None = Field(
+        default_factory=VisualizationLoadForecastPlotConfig
+    )
     anc_bars: VisualizationAncBarConfig | None = Field(default_factory=VisualizationAncBarConfig)
     anc_heatmaps: VisualizationAncHeatmapConfig | None = Field(default_factory=VisualizationAncHeatmapConfig)
     evaluation_report: VisualizationEvaluationReportConfig | None = Field(
@@ -110,6 +139,15 @@ class VisualizationReportConfig(RepoConfigModel):
             if self.probabilistic_forecast.output is not None:
                 self.probabilistic_forecast.output = resolve_path(
                     self.probabilistic_forecast.output, self.repo_root
+                )
+
+        if self.load_forecast_plot is not None:
+            self.load_forecast_plot.forecast_path = resolve_path(
+                self.load_forecast_plot.forecast_path, self.repo_root
+            )
+            if self.load_forecast_plot.output is not None:
+                self.load_forecast_plot.output = resolve_path(
+                    self.load_forecast_plot.output, self.repo_root
                 )
 
         if self.anc_bars is not None:

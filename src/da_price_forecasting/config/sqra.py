@@ -27,6 +27,7 @@ class SqraConfig(RepoConfigModel):
         default_factory=lambda: _default_datetime("2026-02-28T23:45:00+01:00")
     )
     train_days_rolling: int = 60
+    target_availability_lag_days: int = 0
     experiment_name: str = "sqra_dwd_exaa_enriched_d60"
     export_dir: Path = Path("results/sqra_results/dwd_exaa_enriched")
 
@@ -38,6 +39,10 @@ class SqraConfig(RepoConfigModel):
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> "SqraConfig":
+        if self.train_days_rolling < 1:
+            raise ValueError("train_days_rolling must be positive.")
+        if self.target_availability_lag_days < 0:
+            raise ValueError("target_availability_lag_days must be non-negative.")
         self.import_paths = [resolve_path(path, self.repo_root) for path in self.import_paths]
         self.export_dir = resolve_path(self.export_dir, self.repo_root)
         return self

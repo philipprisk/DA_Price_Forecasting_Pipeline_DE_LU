@@ -88,6 +88,7 @@ def rolling_sqra_forecast_mtu(
     train_days: int,
     quantiles: list[float],
     feature_cols: list[str],
+    target_availability_lag_days: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate rolling SQRA quantile forecasts for all MTUs and forecast days."""
     all_days = []
@@ -98,7 +99,7 @@ def rolling_sqra_forecast_mtu(
         start_time = time.perf_counter()
 
         train_start = day - pd.Timedelta(days=train_days)
-        train_end = day - pd.Timedelta(minutes=15)
+        train_end = day - pd.Timedelta(days=target_availability_lag_days) - pd.Timedelta(minutes=15)
         test_end = day + pd.Timedelta(days=1)
 
         train_mask = (df.index >= train_start) & (df.index <= train_end)
@@ -316,6 +317,10 @@ def load_forecast(path: Path) -> pd.DataFrame:
     """Load a point forecast CSV and return a timezone-aware DataFrame."""
     df = pd.read_csv(path, index_col=0)
     df.index = pd.to_datetime(df.index, utc=True).tz_convert("Europe/Berlin")
+    if "y_pred" not in df.columns and "Load_Model_MW" in df.columns:
+        df["y_pred"] = df["Load_Model_MW"]
+    if "y_true" not in df.columns and "Load_Actual_MW" in df.columns:
+        df["y_true"] = df["Load_Actual_MW"]
     return df
 
 
