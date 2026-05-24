@@ -132,6 +132,73 @@ def test_load_energy_arena_source_rewrites_forecast_window(monkeypatch, tmp_path
     assert captured["config"].export_dir == forecast_dir
 
 
+def test_load_energy_arena_quantile_source_keeps_calibration_window(monkeypatch, tmp_path: Path) -> None:
+    from da_price_forecasting.pipelines import load_forecast as lf
+
+    captured = {}
+    index = pd.date_range("2026-05-16T00:00:00+02:00", periods=96, freq="15min")
+
+    def fake_run_load_forecast_pipeline(config, save_outputs):
+        captured["config"] = config
+        captured["save_outputs"] = save_outputs
+        return {
+            "forecast": pd.DataFrame(
+                {
+                    "Load_Model_MW": np.arange(96, dtype=float),
+                    "q0.025": np.arange(96, dtype=float) - 5.0,
+                    "q0.250": np.arange(96, dtype=float) - 2.0,
+                    "q0.500": np.arange(96, dtype=float),
+                    "q0.750": np.arange(96, dtype=float) + 2.0,
+                    "q0.975": np.arange(96, dtype=float) + 5.0,
+                },
+                index=index,
+            ),
+        }
+
+    monkeypatch.setattr(lf, "run_load_forecast_pipeline", fake_run_load_forecast_pipeline)
+
+    submission_config = validate_config_payload(
+        {
+            "repo_root": tmp_path,
+            "source": {
+                "kind": "load_forecast_model",
+                "run_before_submit": True,
+                "config": {
+                    "repo_root": str(tmp_path),
+                    "actual_load_file": str(tmp_path / "actual_load.csv"),
+                    "entsoe_load_forecast_file": str(tmp_path / "load_forecast.csv"),
+                    "icon_dir": str(tmp_path / "icon"),
+                    "export_dir": str(tmp_path / "old_export"),
+                    "weather_source": "open_meteo",
+                    "open_meteo_end_date": "2026-04-23",
+                    "include_weather_features": False,
+                    "include_holiday_features": False,
+                    "include_rolling_residual_quantiles": True,
+                    "residual_quantile_window_days": 84,
+                    "target_availability_lag_days": 1,
+                },
+            },
+            "forecast_date": "2026-05-16",
+            "challenge_id": 43,
+            "target_tz": "Europe/Berlin",
+            "objective": "quantile",
+            "quantile_columns": ["q0.025", "q0.250", "q0.500", "q0.750", "q0.975"],
+        },
+        EnergyArenaSubmissionConfig,
+        repo_root=tmp_path,
+    )
+
+    forecast_dir = tmp_path / "forecast_run"
+    result = load_or_run_forecast_source(submission_config, forecast_dir=forecast_dir)
+
+    assert len(result.forecast) == 96
+    assert captured["save_outputs"] is True
+    assert captured["config"].test_start.isoformat() == "2026-02-20"
+    assert captured["config"].test_end.isoformat() == "2026-05-16"
+    assert captured["config"].entsoe_end_date.isoformat() == "2026-05-16"
+    assert captured["config"].open_meteo_end_date.isoformat() == "2026-05-16"
+
+
 def test_load_energy_arena_source_accepts_runner_config_path(monkeypatch, tmp_path: Path) -> None:
     from da_price_forecasting.pipelines import load_forecast as lf
 

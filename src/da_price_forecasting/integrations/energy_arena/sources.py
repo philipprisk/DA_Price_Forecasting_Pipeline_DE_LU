@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +272,11 @@ def _run_or_load_load_forecast_model(
     source_name = config.export_dir.name
     if source.run_before_submit:
         forecast_day = _forecast_day(submission_config)
-        config.test_start = forecast_day.date()
+        if submission_config.objective.value == "quantile" and config.include_rolling_residual_quantiles:
+            calibration_days = config.residual_quantile_window_days + config.target_availability_lag_days
+            config.test_start = forecast_day.date() - timedelta(days=calibration_days)
+        else:
+            config.test_start = forecast_day.date()
         config.test_end = forecast_day.date()
         config.entsoe_end_date = forecast_day.date()
         if config.weather_source == "open_meteo":
