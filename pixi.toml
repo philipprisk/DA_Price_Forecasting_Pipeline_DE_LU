@@ -127,5 +127,6 @@ energy-arena-load-daily = { cmd = "da-price-energy-arena-load-daily", default-en
 energy-arena-load-open-meteo-daily = { cmd = "da-price-energy-arena-load-daily --model-config configs/load_forecast_hybrid_entsoe_residual_open_meteo_p10_morning1015_daily_weather_hgb_smooth_mar_may22_tw224_f140_weather_spread_broad_f160.yaml --approach-name load_open_meteo_p10_morning1015_weather_spread_broad_f160", default-environment = "lear" }
 energy-arena-load-open-meteo-quantile-daily = { cmd = "da-price-energy-arena-load-daily --model-config configs/load_forecast_hybrid_entsoe_residual_open_meteo_p10_morning1015_daily_weather_hgb_smooth_mar_may22_tw224_f140_weather_spread_broad_f160_rq_global_w84_s105.yaml --challenge-id-env ENERGY_ARENA_LOAD_QUANTILE_CHALLENGE_ID --objective quantile --quantile-columns q0.025 q0.250 q0.500 q0.750 q0.975 --approach-name load_open_meteo_p10_morning1015_weather_spread_broad_f160_rq_global_w84_s105", default-environment = "lear" }
 energy-arena-load-daily-with-weather = { cmd = "da-price-energy-arena-load-daily-with-weather", default-environment = "ops" }
+energy-arena-renewable-daily = { cmd = "da-price-energy-arena-renewable-daily", default-environment = "lear" }
 dwd-icon-daily-update = { cmd = "da-price-dwd-icon-daily-update", default-environment = "ops" }
 test = { cmd = "pytest", default-environment = "dev" }

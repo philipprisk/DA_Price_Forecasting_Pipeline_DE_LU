@@ -1,0 +1,53 @@
+kind: renewable_generation_model
+config:
+  repo_root: "."
+  target_tz: Europe/Berlin
+  country_code_entsoe: DE_LU
+  entsoe_api_key_env: ENTSOE_API_KEY
+
+  entsoe_start_date: "2025-01-01"
+  entsoe_end_date: "2026-05-22"
+  actual_generation_file: data/processed/renewable_generation/actual_generation_2025_20260522.csv
+  renewable_proxy_file: data/processed/renewable_proxy/open_meteo_icon_d2_single_run06_c25_grid_mean_p10_through_20260517_regional_renewable_features.csv
+  unavailability_file: data/processed/renewable_generation/generation_unavailability_2025_2026.csv
+
+  include_dwd_cluster_features: false
+  include_unavailability: false
+  target_feature_mode: technology_specific
+  rolling_bias_correction_window_days: 30
+  rolling_bias_correction_group: hour
+  rolling_bias_correction_min_observations: 24
+  rolling_bias_correction_shrinkage: 0.5
+
+  target_columns:
+    - Solar_Actual_MW
+    - Wind_Total_Actual_MW
+
+  model_type: hist_gradient_boosting
+  train_days_rolling: 90
+  min_train_days: 60
+  target_availability_lag_days: 1
+  target_availability_cutoff_hour: 10
+  target_availability_cutoff_minute: 0
+  test_start: "2026-02-01"
+  test_end: "2026-05-22"
+
+  hgb_max_iter: 500
+  hgb_learning_rate: 0.03
+  hgb_max_leaf_nodes: 15
+  hgb_l2_regularization: 1.0
+  random_state: 42
+
+  target_model_overrides:
+    Solar:
+      hgb_max_iter: 600
+      hgb_learning_rate: 0.025
+      hgb_max_leaf_nodes: 7
+      hgb_l2_regularization: 2.0
+    Wind_Total:
+      hgb_max_iter: 700
+      hgb_learning_rate: 0.02
+      hgb_max_leaf_nodes: 15
+      hgb_l2_regularization: 2.0
+
+  export_dir: results/renewable_generation_results/open_meteo_icon_d2_single_run06_grid_mean_p10_regional_c25_hgb_bias30_hour_s05_d90_cutoff1000_febmay22

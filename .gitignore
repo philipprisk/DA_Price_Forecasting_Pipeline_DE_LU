@@ -27,6 +27,8 @@ key.txt
 configs/*.json
 configs/*.yaml
 configs/*.yml
+!configs/regional_renewable_features_open_meteo_icon_d2_single_run06_c25_grid_mean_p10_through_20260517.yaml
+!configs/renewable_generation_open_meteo_icon_d2_single_run06_grid_mean_p10_regional_c25_hgb_bias30_hour_s05_d90_cutoff1000_febmay22.yaml
 
 # Large/generated data
 data/raw/
