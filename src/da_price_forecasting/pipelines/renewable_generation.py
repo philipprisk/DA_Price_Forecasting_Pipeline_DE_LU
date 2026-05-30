@@ -414,7 +414,7 @@ def build_renewable_generation_dataset(config: RenewableGenerationModelConfig) -
     features = pd.concat(feature_blocks, axis=1).sort_index()
     features = features.loc[:, ~features.columns.duplicated()]
     features = features.reindex(proxy.index)
-    dataset = features.join(actual, how="inner")
+    dataset = features.join(actual, how="left")
     dataset.index.name = "timestamp"
     return dataset.sort_index()
 
