@@ -168,6 +168,65 @@ def test_fetch_actual_load_prefers_actual_column(monkeypatch) -> None:
     assert result["load_actual"].iloc[-1] == 123.0
 
 
+def test_fetch_actual_solar_generation_by_control_area_queries_each_area(monkeypatch) -> None:
+    class FakePandasClient:
+        instances = []
+
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+            self.requests = []
+            self.instances.append(self)
+
+        def query_generation(self, country_code, start, end, psr_type, nett):
+            self.requests.append((country_code, start, end, psr_type, nett))
+            return (_hourly_series(start, "generation") + len(self.requests) * 100.0).to_frame()
+
+    class FakeRawClient:
+        pass
+
+    monkeypatch.setenv("ENTSOE_TEST_API_KEY", "secret")
+    entsoe = _load_entsoe_module(monkeypatch, FakePandasClient, FakeRawClient, lambda xml: None)
+
+    start_day = pd.Timestamp("2026-03-01", tz="Europe/Berlin")
+    result = entsoe.fetch_actual_solar_generation_by_control_area(
+        start_day=start_day,
+        end_day=start_day,
+        control_area_targets={
+            "Solar_50Hertz_Actual_MW": "10YDE-VE-------2",
+            "Solar_Amprion_Actual_MW": "10YDE-RWENET---I",
+        },
+        api_key_env="ENTSOE_TEST_API_KEY",
+    )
+
+    assert len(result) == 96
+    assert result.columns.tolist() == [
+        "Solar_50Hertz_Actual_MW",
+        "Solar_Amprion_Actual_MW",
+        "Solar_Control_Area_Total_Actual_MW",
+    ]
+    assert result["Solar_50Hertz_Actual_MW"].iloc[:4].tolist() == [100.0] * 4
+    assert result["Solar_Amprion_Actual_MW"].iloc[:4].tolist() == [200.0] * 4
+    assert result["Solar_Control_Area_Total_Actual_MW"].iloc[:4].tolist() == [300.0] * 4
+
+    client = FakePandasClient.instances[0]
+    assert client.requests == [
+        (
+            "10YDE-VE-------2",
+            pd.Timestamp("2026-03-01T00:00:00+01:00"),
+            pd.Timestamp("2026-03-02T00:00:00+01:00"),
+            "B16",
+            False,
+        ),
+        (
+            "10YDE-RWENET---I",
+            pd.Timestamp("2026-03-01T00:00:00+01:00"),
+            pd.Timestamp("2026-03-02T00:00:00+01:00"),
+            "B16",
+            False,
+        ),
+    ]
+
+
 def test_fetch_ntc_data_aggregates_bidirectional_neighbor_capacity(monkeypatch) -> None:
     class FakePandasClient:
         instances = []

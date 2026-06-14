@@ -46,6 +46,14 @@ def _canonical_dwd_variable_name(raw_name: str) -> str:
         return "sde"
     if compact in {"snowgsp", "snow", "snowfall", "lsfwe"}:
         return "snow_gsp"
+    if compact in {"clct", "tcc", "totalcloudcover", "cloudcover"}:
+        return "tcc"
+    if compact in {"clcl", "lcc", "lowcloudcover"}:
+        return "lcc"
+    if compact in {"clcm", "mcc", "mediumcloudcover", "midcloudcover"}:
+        return "mcc"
+    if compact in {"clch", "hcc", "highcloudcover"}:
+        return "hcc"
     return key
 
 
@@ -166,6 +174,10 @@ def load_dwd(
                     "tp_",
                     "sde_",
                     "snow_gsp_",
+                    "tcc_",
+                    "lcc_",
+                    "mcc_",
+                    "hcc_",
                 )
             )
         ]
@@ -218,12 +230,17 @@ def _interpolate_100m_wind(df: pd.DataFrame) -> pd.DataFrame:
     has_80 = {"wind_speed_80m", "wind_direction_80m"} <= set(df.columns)
     has_120 = {"wind_speed_120m", "wind_direction_120m"} <= set(df.columns)
 
+    if has_80:
+        df["u80"], df["v80"] = _direction_to_uv(df["wind_speed_80m"], df["wind_direction_80m"])
+    if has_120:
+        df["u120"], df["v120"] = _direction_to_uv(df["wind_speed_120m"], df["wind_direction_120m"])
+    if {"wind_speed_180m", "wind_direction_180m"} <= set(df.columns):
+        df["u180"], df["v180"] = _direction_to_uv(df["wind_speed_180m"], df["wind_direction_180m"])
+
     if has_80 and has_120:
-        u80, v80 = _direction_to_uv(df["wind_speed_80m"], df["wind_direction_80m"])
-        u120, v120 = _direction_to_uv(df["wind_speed_120m"], df["wind_direction_120m"])
         weight = (100.0 - 80.0) / (120.0 - 80.0)
-        df["u100"] = u80 + weight * (u120 - u80)
-        df["v100"] = v80 + weight * (v120 - v80)
+        df["u100"] = df["u80"] + weight * (df["u120"] - df["u80"])
+        df["v100"] = df["v80"] + weight * (df["v120"] - df["v80"])
         return df
 
     if {"wind_speed_10m", "wind_direction_10m"} <= set(df.columns):
@@ -247,15 +264,74 @@ def _normalise_open_meteo_units(df: pd.DataFrame) -> pd.DataFrame:
         df["ssrd"] = df["direct_radiation"] + df["diffuse_radiation"]
     if "direct_radiation" in df.columns:
         df["fdir"] = df["direct_radiation"]
+    if "diffuse_radiation" in df.columns:
+        df["diffuse"] = df["diffuse_radiation"]
     if "cloud_cover" in df.columns:
         df["tcc"] = df["cloud_cover"]
+    if "cloud_cover_low" in df.columns:
+        df["lcc"] = df["cloud_cover_low"]
+    if "cloud_cover_mid" in df.columns:
+        df["mcc"] = df["cloud_cover_mid"]
+    if "cloud_cover_high" in df.columns:
+        df["hcc"] = df["cloud_cover_high"]
     if "precipitation" in df.columns:
         df["tp"] = df["precipitation"]
     if "snow_depth" in df.columns:
         df["sde"] = df["snow_depth"]
+    if "boundary_layer_height" in df.columns:
+        df["pblh"] = df["boundary_layer_height"]
 
     df = _interpolate_100m_wind(df)
     return df
+
+
+_OPEN_METEO_NORMALISED_COLUMNS = [
+    "u80",
+    "v80",
+    "u100",
+    "v100",
+    "u120",
+    "v120",
+    "u180",
+    "v180",
+    "u10",
+    "v10",
+    "t2m",
+    "td2m",
+    "sp",
+    "ssrd",
+    "fdir",
+    "diffuse",
+    "tcc",
+    "lcc",
+    "mcc",
+    "hcc",
+    "tp",
+    "sde",
+    "pblh",
+]
+
+
+def _normalise_open_meteo_points(points: pd.DataFrame) -> pd.DataFrame:
+    required = {"weather_point_id", "lat", "lon"}
+    missing = required - set(points.columns)
+    if missing:
+        raise ValueError(f"Open-Meteo point table is missing required columns: {sorted(missing)}")
+
+    result = points[["weather_point_id", "lat", "lon"]].dropna().copy()
+    result["weather_point_id"] = result["weather_point_id"].astype(int)
+    result["lat"] = result["lat"].astype(float)
+    result["lon"] = result["lon"].astype(float)
+    result = result.sort_values("weather_point_id").reset_index(drop=True)
+    if result["weather_point_id"].duplicated().any():
+        raise ValueError("weather_point_id values must be unique.")
+    if result.empty:
+        raise ValueError("Open-Meteo point table contains no usable points.")
+    return result
+
+
+def _open_meteo_point_keep_columns(point_id: int) -> dict[str, str]:
+    return {column: f"{column}_point_{point_id}" for column in _OPEN_METEO_NORMALISED_COLUMNS}
 
 
 def _open_meteo_response_items(payload: object) -> list[dict]:
@@ -528,6 +604,8 @@ def fetch_open_meteo_cluster_weather(
                 keep_columns = {
                     "u100": f"u100_cluster_{cluster_id}_point_{point_id}",
                     "v100": f"v100_cluster_{cluster_id}_point_{point_id}",
+                    "u180": f"u180_cluster_{cluster_id}_point_{point_id}",
+                    "v180": f"v180_cluster_{cluster_id}_point_{point_id}",
                     "u10": f"u10_cluster_{cluster_id}_point_{point_id}",
                     "v10": f"v10_cluster_{cluster_id}_point_{point_id}",
                     "t2m": f"t2m_cluster_{cluster_id}_point_{point_id}",
@@ -535,9 +613,14 @@ def fetch_open_meteo_cluster_weather(
                     "sp": f"sp_cluster_{cluster_id}_point_{point_id}",
                     "ssrd": f"ssrd_cluster_{cluster_id}_point_{point_id}",
                     "fdir": f"fdir_cluster_{cluster_id}_point_{point_id}",
+                    "diffuse": f"diffuse_cluster_{cluster_id}_point_{point_id}",
                     "tcc": f"tcc_cluster_{cluster_id}_point_{point_id}",
+                    "lcc": f"lcc_cluster_{cluster_id}_point_{point_id}",
+                    "mcc": f"mcc_cluster_{cluster_id}_point_{point_id}",
+                    "hcc": f"hcc_cluster_{cluster_id}_point_{point_id}",
                     "tp": f"tp_cluster_{cluster_id}_point_{point_id}",
                     "sde": f"sde_cluster_{cluster_id}_point_{point_id}",
+                    "pblh": f"pblh_cluster_{cluster_id}_point_{point_id}",
                 }
                 available = [column for column in keep_columns if column in df_cluster.columns]
                 frames.append(df_cluster[available].rename(columns=keep_columns))
@@ -586,7 +669,7 @@ def _average_open_meteo_point_frames(frames: list[pd.DataFrame], points: pd.Data
     weather = weather.loc[~weather.index.duplicated(keep="last")]
 
     averaged = {}
-    for base_name in ["u100", "v100", "u10", "v10", "t2m", "td2m", "sp", "ssrd", "fdir", "tcc", "tp", "sde"]:
+    for base_name in _OPEN_METEO_NORMALISED_COLUMNS:
         for cluster_id in sorted(points["cluster_id"].unique()):
             prefix = f"{base_name}_cluster_{cluster_id}_point_"
             columns = [column for column in weather.columns if column.startswith(prefix)]
@@ -596,6 +679,240 @@ def _average_open_meteo_point_frames(frames: list[pd.DataFrame], points: pd.Data
     weather = pd.DataFrame(averaged, index=weather.index)
     weather.index.name = "timestamp"
     return weather
+
+
+def fetch_open_meteo_point_weather(
+    *,
+    points: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+    output_file: Path | None = None,
+    base_url: str = "https://historical-forecast-api.open-meteo.com/v1/forecast",
+    model: str | None = "icon_d2",
+    hourly_variables: list[str] | None = None,
+    batch_size: int = 10,
+    cell_selection: str = "nearest",
+    timeout_seconds: int = 60,
+    target_tz: str = "Europe/Berlin",
+    api_mode: str = "historical_forecast",
+    single_run_hour_utc: str = "06:00",
+    single_run_forecast_days: int = 2,
+    request_pause_seconds: float = 0.0,
+    retry_attempts: int = 5,
+    retry_backoff_seconds: float = 30.0,
+) -> pd.DataFrame:
+    """Fetch Open-Meteo weather for fixed representative points and keep point-level columns."""
+    if hourly_variables is None:
+        hourly_variables = [
+            "wind_speed_80m",
+            "wind_direction_80m",
+            "wind_speed_120m",
+            "wind_direction_120m",
+            "temperature_2m",
+            "dew_point_2m",
+            "surface_pressure",
+            "shortwave_radiation",
+            "direct_radiation",
+            "diffuse_radiation",
+            "cloud_cover",
+            "precipitation",
+            "snow_depth",
+        ]
+
+    points = _normalise_open_meteo_points(points)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
+    frames = []
+    if api_mode == "historical_forecast":
+        request_start_date = start_date - timedelta(days=1)
+        request_end_date = end_date + timedelta(days=1)
+        requests_to_make: list[tuple[pd.Timestamp | None, str | None]] = [(None, None)]
+    elif api_mode == "single_run":
+        request_start_date = None
+        request_end_date = None
+        target_days = pd.date_range(
+            start=pd.Timestamp(start_date, tz=target_tz),
+            end=pd.Timestamp(end_date, tz=target_tz),
+            freq="D",
+        )
+        requests_to_make = []
+        for target_day in target_days:
+            run_date = target_day.date() - timedelta(days=1)
+            requests_to_make.append((target_day, f"{run_date.isoformat()}T{single_run_hour_utc}"))
+    else:
+        raise ValueError("api_mode must be either 'historical_forecast' or 'single_run'.")
+
+    completed_weather: pd.DataFrame | None = None
+    completed_days: set[pd.Timestamp] = set()
+    if api_mode == "single_run" and output_file is not None and output_file.exists():
+        completed_weather = pd.read_csv(output_file, index_col=0)
+        completed_weather.index = pd.to_datetime(completed_weather.index, utc=True).tz_convert(target_tz)
+        completed_weather = completed_weather.sort_index()
+        completed_weather = completed_weather.loc[~completed_weather.index.duplicated(keep="last")]
+        completed_days = {pd.Timestamp(value).normalize() for value in completed_weather.index.normalize().unique()}
+
+    for target_day, run in requests_to_make:
+        if target_day is not None and target_day.normalize() in completed_days:
+            print(f"[OPEN-METEO] Skipping cached point-weather day: {target_day.date()}")
+            continue
+
+        day_frames_start = len(frames)
+        for start in range(0, len(points), batch_size):
+            batch = points.iloc[start:start + batch_size]
+            items = _fetch_open_meteo_batch(
+                base_url=base_url,
+                latitude=batch["lat"].astype(float).tolist(),
+                longitude=batch["lon"].astype(float).tolist(),
+                start_date=request_start_date,
+                end_date=request_end_date,
+                run=run,
+                forecast_days=single_run_forecast_days if run is not None else None,
+                hourly_variables=hourly_variables,
+                model=model,
+                cell_selection=cell_selection,
+                timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+            )
+            if request_pause_seconds > 0:
+                time.sleep(request_pause_seconds)
+
+            if len(items) != len(batch):
+                raise ValueError(
+                    "Open-Meteo returned a different number of locations than requested "
+                    f"({len(items)} returned, {len(batch)} requested)."
+                )
+
+            for (_, point_row), item in zip(batch.iterrows(), items, strict=True):
+                hourly = item.get("hourly")
+                if not isinstance(hourly, dict) or "time" not in hourly:
+                    raise ValueError(
+                        f"Open-Meteo response is missing hourly time series for point {point_row.weather_point_id}."
+                    )
+
+                df_point = pd.DataFrame(hourly)
+                df_point["timestamp"] = pd.to_datetime(df_point["time"], utc=True).dt.tz_convert(target_tz)
+                df_point = df_point.drop(columns=["time"]).set_index("timestamp")
+                if target_day is not None:
+                    target_start = target_day
+                    target_end = target_start + pd.Timedelta(days=1)
+                    df_point = df_point.loc[(df_point.index >= target_start) & (df_point.index < target_end)]
+                df_point = _normalise_open_meteo_units(df_point)
+
+                point_id = int(point_row.weather_point_id)
+                keep_columns = _open_meteo_point_keep_columns(point_id)
+                available = [column for column in keep_columns if column in df_point.columns]
+                frames.append(df_point[available].rename(columns=keep_columns))
+
+        if api_mode == "single_run" and target_day is not None and output_file is not None:
+            day_weather = pd.concat(frames[day_frames_start:], axis=1).sort_index()
+            day_weather = day_weather.loc[~day_weather.index.duplicated(keep="last")]
+            day_weather.index.name = "timestamp"
+            if completed_weather is not None:
+                completed_weather = pd.concat([completed_weather, day_weather]).sort_index()
+                completed_weather = completed_weather.loc[~completed_weather.index.duplicated(keep="last")]
+            else:
+                completed_weather = day_weather
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            completed_weather.to_csv(output_file)
+            completed_days.add(target_day.normalize())
+            print(f"[OPEN-METEO] Cached single-run point-weather day: {target_day.date()}")
+
+    if not frames:
+        if completed_weather is not None:
+            if api_mode == "single_run":
+                return completed_weather
+            start_ts = pd.Timestamp(start_date, tz=target_tz)
+            end_ts = pd.Timestamp(end_date + timedelta(days=1), tz=target_tz)
+            return completed_weather.loc[(completed_weather.index >= start_ts) & (completed_weather.index < end_ts)]
+        raise ValueError("No Open-Meteo point weather data was fetched.")
+
+    weather = pd.concat(frames, axis=1).sort_index()
+    weather = weather.loc[~weather.index.duplicated(keep="last")]
+    weather.index.name = "timestamp"
+    if completed_weather is not None:
+        weather = pd.concat([completed_weather, weather]).sort_index()
+        weather = weather.loc[~weather.index.duplicated(keep="last")]
+
+    if api_mode != "single_run":
+        start_ts = pd.Timestamp(start_date, tz=target_tz)
+        end_ts = pd.Timestamp(end_date + timedelta(days=1), tz=target_tz)
+        weather = weather.loc[(weather.index >= start_ts) & (weather.index < end_ts)]
+
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        weather.to_csv(output_file)
+
+    return weather
+
+
+def load_open_meteo_points(
+    *,
+    points: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+    cache_file: Path,
+    base_url: str = "https://historical-forecast-api.open-meteo.com/v1/forecast",
+    model: str | None = "icon_d2",
+    hourly_variables: list[str] | None = None,
+    batch_size: int = 10,
+    cell_selection: str = "nearest",
+    timeout_seconds: int = 60,
+    target_tz: str = "Europe/Berlin",
+    force_download: bool = False,
+    api_mode: str = "historical_forecast",
+    single_run_hour_utc: str = "06:00",
+    single_run_forecast_days: int = 2,
+    request_pause_seconds: float = 0.0,
+    retry_attempts: int = 5,
+    retry_backoff_seconds: float = 30.0,
+) -> pd.DataFrame:
+    """Load cached point-level Open-Meteo weather or fetch missing single-run days."""
+    if cache_file.exists() and not force_download:
+        df = pd.read_csv(cache_file, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert(target_tz)
+        df = df.sort_index()
+        df = df.loc[~df.index.duplicated(keep="last")]
+        df.index.name = "timestamp"
+        if api_mode != "single_run":
+            return df
+
+        expected_days = pd.date_range(
+            start=pd.Timestamp(start_date, tz=target_tz),
+            end=pd.Timestamp(end_date, tz=target_tz),
+            freq="D",
+        )
+        cached_days = pd.DatetimeIndex(df.index.normalize().unique()).sort_values()
+        missing_days = expected_days.difference(cached_days)
+        if missing_days.empty:
+            return df
+
+        print(
+            "[OPEN-METEO] Point-weather single-run cache is incomplete: "
+            f"{len(cached_days)}/{len(expected_days)} days cached. "
+            f"Resuming from {missing_days.min().date()}..."
+        )
+
+    return fetch_open_meteo_point_weather(
+        points=points,
+        start_date=start_date,
+        end_date=end_date,
+        output_file=cache_file,
+        base_url=base_url,
+        model=model,
+        hourly_variables=hourly_variables,
+        batch_size=batch_size,
+        cell_selection=cell_selection,
+        timeout_seconds=timeout_seconds,
+        target_tz=target_tz,
+        api_mode=api_mode,
+        single_run_hour_utc=single_run_hour_utc,
+        single_run_forecast_days=single_run_forecast_days,
+        request_pause_seconds=request_pause_seconds,
+        retry_attempts=retry_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
 
 
 def load_open_meteo(

@@ -22,6 +22,7 @@ from ..config import (
 )
 from ..data.entsoe import (
     fetch_actual_renewable_generation,
+    fetch_actual_solar_generation_by_control_area,
     fetch_generation_unavailability,
     fetch_renewable_generation_forecast,
 )
@@ -51,22 +52,33 @@ def _load_renewable_proxy(config: RenewableGenerationModelConfig) -> pd.DataFram
             "Run the regional renewable feature preprocessing step first."
         )
 
-    primary = _load_timestamp_csv(config.renewable_proxy_file, config.target_tz)
-    if config.renewable_proxy_fallback_file is None:
-        return primary
+    proxy = _load_timestamp_csv(config.renewable_proxy_file, config.target_tz)
+    if config.renewable_proxy_fallback_file is not None:
+        if not config.renewable_proxy_fallback_file.exists():
+            raise FileNotFoundError(
+                f"Renewable proxy fallback file not found: {config.renewable_proxy_fallback_file}. "
+                "Run the fallback regional renewable feature preprocessing step first."
+            )
 
-    if not config.renewable_proxy_fallback_file.exists():
-        raise FileNotFoundError(
-            f"Renewable proxy fallback file not found: {config.renewable_proxy_fallback_file}. "
-            "Run the fallback regional renewable feature preprocessing step first."
-        )
+        fallback = _load_timestamp_csv(config.renewable_proxy_fallback_file, config.target_tz)
+        if config.renewable_proxy_fallback_end_date is not None:
+            fallback_end = _as_local_day(config.renewable_proxy_fallback_end_date, config.target_tz)
+            fallback = fallback.loc[fallback.index < fallback_end + pd.Timedelta(days=1)]
+        proxy = proxy.combine_first(fallback).sort_index()
 
-    fallback = _load_timestamp_csv(config.renewable_proxy_fallback_file, config.target_tz)
-    if config.renewable_proxy_fallback_end_date is not None:
-        fallback_end = _as_local_day(config.renewable_proxy_fallback_end_date, config.target_tz)
-        fallback = fallback.loc[fallback.index < fallback_end + pd.Timedelta(days=1)]
+    prefixes = config.extra_renewable_proxy_prefixes or [f"extra_{idx + 1}_" for idx in range(len(config.extra_renewable_proxy_files))]
+    for extra_file, prefix in zip(config.extra_renewable_proxy_files, prefixes, strict=True):
+        if not extra_file.exists():
+            raise FileNotFoundError(
+                f"Extra renewable proxy file not found: {extra_file}. "
+                "Run the corresponding regional renewable feature preprocessing step first."
+            )
+        extra = _load_timestamp_csv(extra_file, config.target_tz)
+        if prefix:
+            extra = extra.add_prefix(prefix)
+        extra = extra.reindex(proxy.index)
+        proxy = proxy.join(extra, how="left")
 
-    proxy = primary.combine_first(fallback).sort_index()
     proxy = proxy.loc[:, ~proxy.columns.duplicated()]
     proxy.index.name = "timestamp"
     return proxy
@@ -74,7 +86,16 @@ def _load_renewable_proxy(config: RenewableGenerationModelConfig) -> pd.DataFram
 
 def _load_or_fetch_actual_generation(config: RenewableGenerationModelConfig) -> pd.DataFrame:
     if config.actual_generation_file.exists():
-        return _load_timestamp_csv(config.actual_generation_file, config.target_tz)
+        actual = _load_timestamp_csv(config.actual_generation_file, config.target_tz)
+        required_columns = set(config.target_columns)
+        if config.actual_generation_lag_days:
+            required_columns.update(config.actual_generation_lag_columns)
+        if config.include_partial_actual_generation_features:
+            partial_columns = config.partial_generation_columns or config.actual_generation_lag_columns
+            required_columns.update(partial_columns)
+        missing_columns = [column for column in required_columns if column not in actual.columns]
+        if not (config.include_solar_control_area_targets and missing_columns):
+            return actual
 
     start = _as_local_day(config.entsoe_start_date, config.target_tz)
     end = _as_local_day(config.entsoe_end_date, config.target_tz)
@@ -85,6 +106,15 @@ def _load_or_fetch_actual_generation(config: RenewableGenerationModelConfig) -> 
         api_key_env=config.entsoe_api_key_env,
         target_tz=config.target_tz,
     )
+    if config.include_solar_control_area_targets:
+        control_area_actual = fetch_actual_solar_generation_by_control_area(
+            start_day=start,
+            end_day=end,
+            control_area_targets=config.solar_control_area_targets,
+            api_key_env=config.entsoe_api_key_env,
+            target_tz=config.target_tz,
+        )
+        df = df.join(control_area_actual, how="outer")
     _save_timestamp_csv(df, config.actual_generation_file)
     return df
 
@@ -275,6 +305,258 @@ def _build_forecast_lead_features(
     return features
 
 
+_SOLAR_GEOMETRY_POINTS = {
+    "central": (51.0, 10.0),
+    "east": (51.5, 13.0),
+    "north": (53.5, 9.5),
+    "south": (48.5, 11.5),
+    "west": (51.0, 7.0),
+}
+
+
+def _solar_position_features(index: pd.DatetimeIndex, *, latitude: float, longitude: float) -> pd.DataFrame:
+    """Approximate solar position features from NOAA-style equations."""
+    output_index = index
+    utc = pd.to_datetime(pd.Index(index), utc=True)
+    minutes_utc = (
+        utc.hour.to_numpy(dtype=float) * 60.0
+        + utc.minute.to_numpy(dtype=float)
+        + utc.second.to_numpy(dtype=float) / 60.0
+    )
+    hour_utc = minutes_utc / 60.0
+    day_of_year = utc.dayofyear.to_numpy(dtype=float)
+
+    gamma = 2.0 * np.pi / 365.0 * (day_of_year - 1.0 + (hour_utc - 12.0) / 24.0)
+    equation_of_time = 229.18 * (
+        0.000075
+        + 0.001868 * np.cos(gamma)
+        - 0.032077 * np.sin(gamma)
+        - 0.014615 * np.cos(2.0 * gamma)
+        - 0.040849 * np.sin(2.0 * gamma)
+    )
+    declination = (
+        0.006918
+        - 0.399912 * np.cos(gamma)
+        + 0.070257 * np.sin(gamma)
+        - 0.006758 * np.cos(2.0 * gamma)
+        + 0.000907 * np.sin(2.0 * gamma)
+        - 0.002697 * np.cos(3.0 * gamma)
+        + 0.00148 * np.sin(3.0 * gamma)
+    )
+
+    true_solar_time = (minutes_utc + equation_of_time + 4.0 * longitude) % 1440.0
+    hour_angle = np.deg2rad(true_solar_time / 4.0 - 180.0)
+    lat_rad = np.deg2rad(latitude)
+
+    cos_zenith = (
+        np.sin(lat_rad) * np.sin(declination)
+        + np.cos(lat_rad) * np.cos(declination) * np.cos(hour_angle)
+    )
+    cos_zenith = np.clip(cos_zenith, -1.0, 1.0)
+    positive_cos_zenith = np.clip(cos_zenith, 0.0, None)
+    elevation_deg = np.rad2deg(np.arcsin(cos_zenith))
+
+    return pd.DataFrame(
+        {
+            "cos_zenith": cos_zenith,
+            "positive_cos_zenith": positive_cos_zenith,
+            "elevation_deg": elevation_deg,
+            "clear_sky_proxy": positive_cos_zenith**1.25,
+            "is_daylight": (positive_cos_zenith > 0.0).astype(float),
+        },
+        index=output_index,
+    )
+
+
+def _build_solar_geometry_features(proxy: pd.DataFrame) -> pd.DataFrame:
+    """Build deterministic solar-geometry and clear-sky-index features."""
+    blocks: list[pd.DataFrame] = []
+    clear_sky_columns = []
+    for region, (latitude, longitude) in _SOLAR_GEOMETRY_POINTS.items():
+        geometry = _solar_position_features(proxy.index, latitude=latitude, longitude=longitude)
+        geometry = geometry.add_prefix(f"solar_geom_{region}_")
+
+        irradiance_col = f"solar_{region}_irradiance_cap_weighted_W_m2"
+        clear_sky_col = f"solar_geom_{region}_clear_sky_proxy"
+        if irradiance_col in proxy.columns:
+            denominator = 1000.0 * geometry[clear_sky_col].to_numpy(dtype=float)
+            clear_sky_index = np.divide(
+                proxy[irradiance_col].to_numpy(dtype=float),
+                denominator,
+                out=np.zeros(len(proxy), dtype=float),
+                where=denominator > 1e-6,
+            )
+            geometry[f"solar_geom_{region}_clear_sky_index"] = np.clip(clear_sky_index, 0.0, 2.0)
+
+        blocks.append(geometry)
+        clear_sky_columns.append(clear_sky_col)
+
+    result = pd.concat(blocks, axis=1)
+    result["solar_geom_clear_sky_proxy_mean"] = result[clear_sky_columns].mean(axis=1)
+    result["solar_geom_clear_sky_proxy_max"] = result[clear_sky_columns].max(axis=1)
+    result["solar_geom_clear_sky_proxy_spread"] = (
+        result["solar_geom_clear_sky_proxy_max"] - result[clear_sky_columns].min(axis=1)
+    )
+    result.index.name = "timestamp"
+    return result
+
+
+def _build_solar_physics_features(proxy: pd.DataFrame) -> pd.DataFrame:
+    """Build compact PV-oriented features from regional solar weather proxies."""
+    frames: dict[str, pd.Series] = {}
+    summary_columns: dict[str, list[str]] = {
+        "direct_proxy": [],
+        "diffuse_proxy": [],
+        "temperature_corrected_proxy": [],
+        "clear_sky_index": [],
+    }
+
+    for region, (latitude, longitude) in _SOLAR_GEOMETRY_POINTS.items():
+        prefix = f"solar_{region}"
+        proxy_col = f"{prefix}_proxy_mw"
+        irradiance_col = f"{prefix}_irradiance_cap_weighted_W_m2"
+        direct_col = f"{prefix}_direct_irradiance_cap_weighted_W_m2"
+        t2m_col = f"{prefix}_t2m_cap_weighted_K"
+
+        if proxy_col not in proxy.columns or irradiance_col not in proxy.columns:
+            continue
+
+        proxy_mw = proxy[proxy_col].astype(float)
+        irradiance = proxy[irradiance_col].astype(float).clip(lower=0.0)
+        if direct_col in proxy.columns:
+            direct = proxy[direct_col].astype(float).clip(lower=0.0)
+        else:
+            direct = pd.Series(0.0, index=proxy.index)
+        diffuse = (irradiance - direct).clip(lower=0.0)
+        direct_share = pd.Series(
+            np.divide(
+                direct.to_numpy(dtype=float),
+                irradiance.to_numpy(dtype=float),
+                out=np.zeros(len(proxy), dtype=float),
+                where=irradiance.to_numpy(dtype=float) > 1e-6,
+            ),
+            index=proxy.index,
+        ).clip(lower=0.0, upper=1.0)
+        diffuse_share = (1.0 - direct_share).clip(lower=0.0, upper=1.0)
+
+        frames[f"solar_phys_{region}_direct_share"] = direct_share
+        frames[f"solar_phys_{region}_diffuse_irradiance_W_m2"] = diffuse
+        frames[f"solar_phys_{region}_direct_proxy_mw"] = proxy_mw * direct_share
+        frames[f"solar_phys_{region}_diffuse_proxy_mw"] = proxy_mw * diffuse_share
+        summary_columns["direct_proxy"].append(f"solar_phys_{region}_direct_proxy_mw")
+        summary_columns["diffuse_proxy"].append(f"solar_phys_{region}_diffuse_proxy_mw")
+
+        geometry = _solar_position_features(proxy.index, latitude=latitude, longitude=longitude)
+        clear_sky = 1000.0 * geometry["clear_sky_proxy"].astype(float)
+        clear_sky_index = pd.Series(
+            np.divide(
+                irradiance.to_numpy(dtype=float),
+                clear_sky.to_numpy(dtype=float),
+                out=np.zeros(len(proxy), dtype=float),
+                where=clear_sky.to_numpy(dtype=float) > 1e-6,
+            ),
+            index=proxy.index,
+        ).clip(lower=0.0, upper=2.0)
+        frames[f"solar_phys_{region}_clear_sky_index"] = clear_sky_index
+        frames[f"solar_phys_{region}_cloud_attenuation_proxy"] = (1.0 - clear_sky_index).clip(lower=-1.0, upper=1.0)
+        summary_columns["clear_sky_index"].append(f"solar_phys_{region}_clear_sky_index")
+
+        if t2m_col in proxy.columns:
+            t2m_c = proxy[t2m_col].astype(float) - 273.15
+            module_temp_c = t2m_c + 0.025 * irradiance
+            efficiency_factor = (1.0 - 0.004 * (module_temp_c - 25.0)).clip(lower=0.75, upper=1.15)
+            temp_corrected_proxy = proxy_mw * efficiency_factor
+            frames[f"solar_phys_{region}_module_temp_proxy_C"] = module_temp_c
+            frames[f"solar_phys_{region}_temperature_efficiency_factor"] = efficiency_factor
+            frames[f"solar_phys_{region}_temperature_corrected_proxy_mw"] = temp_corrected_proxy
+            frames[f"solar_phys_{region}_hot_irradiance_interaction"] = (module_temp_c - 25.0).clip(lower=0.0) * irradiance
+            summary_columns["temperature_corrected_proxy"].append(
+                f"solar_phys_{region}_temperature_corrected_proxy_mw"
+            )
+
+    if not frames:
+        return pd.DataFrame(index=proxy.index)
+
+    result = pd.DataFrame(frames, index=proxy.index)
+    for name, columns in summary_columns.items():
+        available = [column for column in columns if column in result.columns]
+        if not available:
+            continue
+        result[f"solar_phys_{name}_sum"] = result[available].sum(axis=1)
+        result[f"solar_phys_{name}_mean"] = result[available].mean(axis=1)
+        result[f"solar_phys_{name}_spread"] = result[available].max(axis=1) - result[available].min(axis=1)
+
+    result.index.name = "timestamp"
+    return result
+
+
+def _build_solar_physics_proxy_baselines(
+    proxy: pd.DataFrame,
+    config: RenewableGenerationModelConfig,
+) -> pd.DataFrame:
+    """Build temperature-corrected physical PV baseline columns.
+
+    The raw regional renewable proxy is already capacity weighted. This helper
+    keeps that structure and applies a simple module-temperature efficiency
+    correction so the model can learn a residual around a physics-informed
+    baseline rather than the full solar generation level.
+    """
+    frames: dict[str, pd.Series] = {}
+    proxy_suffix = "_proxy_mw"
+    proxy_columns = [
+        column
+        for column in proxy.columns
+        if column.startswith("solar_")
+        and column.endswith(proxy_suffix)
+        and "_physics_" not in column
+    ]
+    if not proxy_columns:
+        return pd.DataFrame(index=proxy.index)
+
+    for proxy_col in proxy_columns:
+        region = proxy_col.removeprefix("solar_").removesuffix(proxy_suffix)
+        region_prefix = f"solar_{region}"
+        base_proxy = proxy[proxy_col].astype(float).clip(lower=0.0)
+        irradiance_col = f"{region_prefix}_irradiance_cap_weighted_W_m2"
+        t2m_col = f"{region_prefix}_t2m_cap_weighted_K"
+
+        if irradiance_col in proxy.columns and t2m_col in proxy.columns:
+            irradiance = proxy[irradiance_col].astype(float).clip(lower=0.0)
+            t2m_c = proxy[t2m_col].astype(float) - 273.15
+            module_temp_c = (
+                t2m_c
+                + config.solar_physics_proxy_module_temperature_irradiance_coeff * irradiance
+            )
+            temperature_factor = (
+                1.0
+                + config.solar_physics_proxy_temperature_coefficient
+                * (module_temp_c - 25.0)
+            ).clip(
+                lower=config.solar_physics_proxy_min_temperature_factor,
+                upper=config.solar_physics_proxy_max_temperature_factor,
+            )
+        else:
+            module_temp_c = pd.Series(np.nan, index=proxy.index)
+            temperature_factor = pd.Series(1.0, index=proxy.index)
+
+        frames[f"{region_prefix}_physics_proxy_mw"] = (base_proxy * temperature_factor).clip(lower=0.0)
+        frames[f"{region_prefix}_physics_temperature_factor"] = temperature_factor
+        frames[f"{region_prefix}_physics_module_temp_C"] = module_temp_c
+
+    result = pd.DataFrame(frames, index=proxy.index)
+    tso_physics_columns = [
+        f"solar_{region}_physics_proxy_mw"
+        for region in ("50hertz", "amprion", "tennet", "transnetbw")
+        if f"solar_{region}_physics_proxy_mw" in result.columns
+    ]
+    if tso_physics_columns:
+        result["Renewable_Solar_Physics_Proxy_MW"] = result[tso_physics_columns].sum(axis=1)
+        result["Solar_Physics_Proxy_MW"] = result["Renewable_Solar_Physics_Proxy_MW"]
+
+    result.index.name = "timestamp"
+    return result
+
+
 def _build_dwd_cluster_features(config: RenewableGenerationModelConfig) -> pd.DataFrame:
     df_hourly, df_qh = load_dwd(
         icon_dir=config.icon_dir,
@@ -386,6 +668,111 @@ def _build_actual_generation_lag_features(
     return result
 
 
+def _partial_generation_feature_label(column: str) -> str:
+    return column.removesuffix("_Actual_MW").lower()
+
+
+def _partial_generation_window_label(end_hour: int, end_minute: int) -> str:
+    if end_minute == 0:
+        return f"{end_hour:02d}00"
+    return f"{end_hour:02d}{end_minute:02d}"
+
+
+def _build_partial_actual_generation_features(
+    actual: pd.DataFrame,
+    target_index: pd.DatetimeIndex,
+    *,
+    columns: list[str],
+    reference_day: int,
+    comparison_lag_days: int,
+    morning_end_hour: int,
+    morning_end_minute: int,
+) -> pd.DataFrame:
+    """Summarise actual generation observed on the forecast creation morning.
+
+    For a forecast day D, source values are taken from D-reference_day between
+    00:00 and the configured morning cutoff. This keeps live forecasts aligned
+    with the information available before day-ahead gate closure.
+    """
+    if target_index.empty:
+        return pd.DataFrame(index=target_index)
+
+    available_columns = [column for column in columns if column in actual.columns]
+    if not available_columns:
+        return pd.DataFrame(index=target_index)
+
+    actual = actual.sort_index()
+    forecast_days = pd.DatetimeIndex(target_index.normalize().unique()).sort_values()
+    end_delta = pd.Timedelta(hours=morning_end_hour, minutes=morning_end_minute)
+    window_label = _partial_generation_window_label(morning_end_hour, morning_end_minute)
+
+    rows: dict[pd.Timestamp, dict[str, float]] = {}
+    for day in forecast_days:
+        source_day = day - pd.Timedelta(days=reference_day)
+        comparison_day = source_day - pd.Timedelta(days=comparison_lag_days)
+        source = actual.loc[source_day:source_day + end_delta, available_columns]
+        comparison = actual.loc[comparison_day:comparison_day + end_delta, available_columns]
+
+        row: dict[str, float] = {}
+        for column in available_columns:
+            label = _partial_generation_feature_label(column)
+            prefix = f"partial_gen_{label}_d{reference_day}_00_{window_label}"
+
+            source_values = source[column].dropna()
+            comparison_values = comparison[column].dropna()
+
+            if source_values.empty:
+                source_stats = {
+                    "mean": np.nan,
+                    "max": np.nan,
+                    "min": np.nan,
+                    "last": np.nan,
+                    "sum": np.nan,
+                    "range": np.nan,
+                    "ramp": np.nan,
+                }
+            else:
+                source_stats = {
+                    "mean": float(source_values.mean()),
+                    "max": float(source_values.max()),
+                    "min": float(source_values.min()),
+                    "last": float(source_values.iloc[-1]),
+                    "sum": float(source_values.sum()),
+                    "range": float(source_values.max() - source_values.min()),
+                    "ramp": float(source_values.iloc[-1] - source_values.iloc[0]),
+                }
+
+            if comparison_values.empty:
+                comparison_stats = {
+                    "mean": np.nan,
+                    "last": np.nan,
+                    "sum": np.nan,
+                    "ramp": np.nan,
+                }
+            else:
+                comparison_stats = {
+                    "mean": float(comparison_values.mean()),
+                    "last": float(comparison_values.iloc[-1]),
+                    "sum": float(comparison_values.sum()),
+                    "ramp": float(comparison_values.iloc[-1] - comparison_values.iloc[0]),
+                }
+
+            for stat, value in source_stats.items():
+                row[f"{prefix}_{stat}"] = value
+            for stat, comparison_value in comparison_stats.items():
+                row[f"{prefix}_{stat}_diff_d{comparison_lag_days}"] = (
+                    source_stats[stat] - comparison_value
+                )
+
+        rows[day] = row
+
+    daily = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    result = daily.reindex(pd.DatetimeIndex(target_index.normalize()))
+    result.index = target_index
+    result.index.name = "timestamp"
+    return result
+
+
 def build_renewable_generation_dataset(config: RenewableGenerationModelConfig) -> pd.DataFrame:
     """Build aligned timestamp-level features and actual renewable generation targets."""
     actual = _load_or_fetch_actual_generation(config)
@@ -397,6 +784,12 @@ def build_renewable_generation_dataset(config: RenewableGenerationModelConfig) -
     feature_blocks.append(_build_time_features(proxy.index))
     if config.include_forecast_lead_features:
         feature_blocks.append(_build_forecast_lead_features(proxy.index, config))
+    if config.include_solar_geometry_features:
+        feature_blocks.append(_build_solar_geometry_features(proxy))
+    if config.include_solar_physics_features:
+        feature_blocks.append(_build_solar_physics_features(proxy))
+    if config.include_solar_physics_features or config.target_baseline_mode == "solar_physics_proxy":
+        feature_blocks.append(_build_solar_physics_proxy_baselines(proxy, config))
     if config.include_dwd_cluster_features:
         dwd_features = _build_dwd_cluster_features(config)
         if config.include_nwp_lag_diff_features:
@@ -410,6 +803,19 @@ def build_renewable_generation_dataset(config: RenewableGenerationModelConfig) -
         feature_blocks.append(_load_or_fetch_unavailability(config))
     if config.actual_generation_lag_days:
         feature_blocks.append(_build_actual_generation_lag_features(actual, config))
+    if config.include_partial_actual_generation_features:
+        partial_columns = config.partial_generation_columns or config.actual_generation_lag_columns
+        feature_blocks.append(
+            _build_partial_actual_generation_features(
+                actual,
+                proxy.index,
+                columns=partial_columns,
+                reference_day=config.partial_generation_reference_day,
+                comparison_lag_days=config.partial_generation_comparison_lag_days,
+                morning_end_hour=config.partial_generation_morning_end_hour,
+                morning_end_minute=config.partial_generation_morning_end_minute,
+            )
+        )
 
     features = pd.concat(feature_blocks, axis=1).sort_index()
     features = features.loc[:, ~features.columns.duplicated()]
@@ -426,12 +832,51 @@ def _feature_columns(dataset: pd.DataFrame, target_columns: list[str]) -> list[s
         "Wind_Offshore_Actual_MW",
         "Wind_Total_Actual_MW",
         "Renewable_Total_Actual_MW",
+        "Solar_Control_Area_Total_Actual_MW",
     }
     return [
         column
         for column in dataset.select_dtypes(include="number").columns
-        if column not in target_set
+        if column not in target_set and not column.endswith("_Actual_MW")
     ]
+
+
+def _read_feature_allowlist(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Feature allowlist file not found: {path}")
+
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+        if "feature" in df.columns:
+            values = df["feature"]
+        elif len(df.columns) >= 1:
+            values = df.iloc[:, 0]
+        else:
+            values = pd.Series(dtype=str)
+        return [str(value) for value in values.dropna().tolist() if str(value).strip()]
+
+    with path.open(encoding="utf-8") as handle:
+        return [
+            line.strip()
+            for line in handle
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+
+def _feature_allowlist_for_target(
+    target: str,
+    config: RenewableGenerationModelConfig,
+) -> list[str] | None:
+    path = None
+    for alias in _target_aliases(target):
+        path = config.target_feature_allowlist_files.get(alias)
+        if path is not None:
+            break
+    if path is None:
+        path = config.feature_allowlist_file
+    if path is None:
+        return None
+    return _read_feature_allowlist(path)
 
 
 def _target_candidate_features(
@@ -520,7 +965,11 @@ def _make_model(config: RenewableGenerationModelConfig, target: str | None = Non
             max_iter=int(_model_param(config, overrides, "hgb_max_iter")),
             learning_rate=float(_model_param(config, overrides, "hgb_learning_rate")),
             max_leaf_nodes=int(_model_param(config, overrides, "hgb_max_leaf_nodes")),
+            max_depth=_model_param(config, overrides, "hgb_max_depth"),
+            min_samples_leaf=int(_model_param(config, overrides, "hgb_min_samples_leaf")),
             l2_regularization=float(_model_param(config, overrides, "hgb_l2_regularization")),
+            max_features=float(_model_param(config, overrides, "hgb_max_features")),
+            max_bins=int(_model_param(config, overrides, "hgb_max_bins")),
             random_state=int(_model_param(config, overrides, "random_state")),
         )
         if use_pca:
@@ -547,6 +996,104 @@ def _make_model(config: RenewableGenerationModelConfig, target: str | None = Non
 
 def _target_output_name(target: str) -> str:
     return target.removesuffix("_Actual_MW")
+
+
+def _solar_physics_proxy_baseline_candidates(target: str) -> list[str]:
+    target_lower = _target_output_name(target).lower()
+    if "50hertz" in target_lower:
+        regions = ["50hertz"]
+    elif "amprion" in target_lower:
+        regions = ["amprion"]
+    elif "tennet" in target_lower:
+        regions = ["tennet"]
+    elif "transnetbw" in target_lower:
+        regions = ["transnetbw"]
+    elif "solar" in target_lower:
+        return [
+            "Solar_Physics_Proxy_MW",
+            "Renewable_Solar_Physics_Proxy_MW",
+            "Renewable_Solar_Proxy_MW",
+        ]
+    else:
+        regions = []
+
+    candidates: list[str] = []
+    for region in regions:
+        candidates.extend(
+            [
+                f"solar_{region}_physics_proxy_mw",
+                f"solar_{region}_proxy_mw",
+            ]
+        )
+    return candidates
+
+
+def _target_baseline_column(
+    target: str,
+    config: RenewableGenerationModelConfig,
+    features: list[str],
+) -> str | None:
+    if config.target_baseline_mode == "none":
+        return None
+
+    feature_set = set(features)
+    for alias in _target_aliases(target):
+        configured = config.target_baseline_columns.get(alias)
+        if configured is None:
+            continue
+        if configured not in feature_set:
+            raise ValueError(
+                f"Configured target baseline column {configured!r} for {target!r} "
+                "is not available in the renewable generation dataset."
+            )
+        return configured
+
+    if config.target_baseline_mode == "solar_physics_proxy":
+        if "solar" not in target.lower():
+            return None
+        for candidate in _solar_physics_proxy_baseline_candidates(target):
+            if candidate in feature_set:
+                return candidate
+        raise ValueError(
+            f"target_baseline_mode='solar_physics_proxy' could not find a baseline "
+            f"column for {target!r}. Expected one of "
+            f"{_solar_physics_proxy_baseline_candidates(target)}."
+        )
+
+    raise ValueError(f"Unsupported target_baseline_mode: {config.target_baseline_mode!r}")
+
+
+def _target_model_values_with_baseline(
+    target: str,
+    y_train: pd.Series,
+    X_train_all: pd.DataFrame,
+    config: RenewableGenerationModelConfig,
+    installed_capacity_mw: dict[str, float],
+    baseline_column: str | None,
+) -> pd.Series:
+    if baseline_column is None:
+        return _model_target_values(target, y_train, config, installed_capacity_mw)
+
+    baseline = X_train_all.loc[y_train.index, baseline_column].astype(float).fillna(0.0)
+    return y_train - baseline
+
+
+def _model_predictions_with_baseline_to_mw(
+    target: str,
+    predictions: np.ndarray,
+    X_test: pd.DataFrame,
+    config: RenewableGenerationModelConfig,
+    installed_capacity_mw: dict[str, float],
+    baseline_column: str | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if baseline_column is None:
+        return (
+            _model_predictions_to_mw(target, predictions, config, installed_capacity_mw),
+            None,
+        )
+
+    baseline = X_test[baseline_column].astype(float).fillna(0.0).to_numpy(dtype=float)
+    return baseline + predictions, baseline
 
 
 def _target_upper_bound(
@@ -665,9 +1212,19 @@ def _apply_rolling_bias_correction(
     true_col: str,
     upper_bound: float | None,
     config: RenewableGenerationModelConfig,
+    window_days: int | None = None,
+    group: str | None = None,
+    min_observations: int | None = None,
+    shrinkage: float | None = None,
 ) -> None:
-    window_days = int(config.rolling_bias_correction_window_days)
-    if window_days <= 0 or pred_col not in day_forecast.columns:
+    window_days = int(config.rolling_bias_correction_window_days if window_days is None else window_days)
+    group = config.rolling_bias_correction_group if group is None else group
+    min_observations = (
+        config.rolling_bias_correction_min_observations if min_observations is None else int(min_observations)
+    )
+    shrinkage = config.rolling_bias_correction_shrinkage if shrinkage is None else float(shrinkage)
+
+    if window_days <= 0 or pred_col not in day_forecast.columns or true_col not in day_forecast.columns:
         return
 
     history_blocks = [
@@ -681,12 +1238,11 @@ def _apply_rolling_bias_correction(
     window_start = day - pd.Timedelta(days=window_days)
     history = pd.concat(history_blocks).sort_index()
     history = history.loc[(history.index >= window_start) & (history.index < day), [pred_col, true_col]].dropna()
-    if len(history) < config.rolling_bias_correction_min_observations:
+    if len(history) < min_observations:
         return
 
     errors = history[pred_col] - history[true_col]
     global_bias = float(errors.mean())
-    group = config.rolling_bias_correction_group
 
     if group == "global":
         correction = np.repeat(global_bias, len(day_forecast))
@@ -694,14 +1250,12 @@ def _apply_rolling_bias_correction(
         history_keys = _bias_group_values(history.index, group)
         bias_by_group = errors.groupby(history_keys).mean()
         count_by_group = errors.groupby(history_keys).count()
-        bias_by_group = bias_by_group[count_by_group >= config.rolling_bias_correction_min_observations]
+        bias_by_group = bias_by_group[count_by_group >= min_observations]
         current_keys = pd.Series(_bias_group_values(day_forecast.index, group), index=day_forecast.index)
         correction_series = current_keys.map(bias_by_group).fillna(global_bias)
         correction = correction_series.to_numpy(dtype=float)
 
-    corrected = day_forecast[pred_col].to_numpy(dtype=float) - (
-        float(config.rolling_bias_correction_shrinkage) * correction
-    )
+    corrected = day_forecast[pred_col].to_numpy(dtype=float) - (shrinkage * correction)
     day_forecast[pred_col] = np.clip(corrected, 0.0, upper_bound)
 
 
@@ -721,6 +1275,14 @@ def rolling_renewable_generation_forecast(
 
     features_by_target = {
         target: _target_candidate_features(features, target, config)
+        for target in target_columns
+    }
+    baseline_columns_by_target = {
+        target: _target_baseline_column(target, config, features)
+        for target in target_columns
+    }
+    feature_allowlists_by_target = {
+        target: _feature_allowlist_for_target(target, config)
         for target in target_columns
     }
 
@@ -748,9 +1310,22 @@ def rolling_renewable_generation_forecast(
             continue
 
         day_forecast = pd.DataFrame(index=X_test.index)
-        output_upper_bounds: dict[str, float | None] = {}
         for target in target_columns:
             target_features = features_by_target[target]
+            baseline_column = baseline_columns_by_target[target]
+            feature_allowlist = feature_allowlists_by_target[target]
+            if feature_allowlist is not None:
+                candidate_set = set(target_features)
+                target_features = [
+                    feature
+                    for feature in feature_allowlist
+                    if feature in candidate_set
+                ]
+                if not target_features:
+                    raise ValueError(
+                        f"Feature allowlist for {target!r} did not match any candidate features."
+                    )
+
             train_target_mask = dataset.loc[train_mask, target].notna()
             X_train = X_train_all.loc[train_target_mask, target_features]
             y_train = dataset.loc[train_mask, target].loc[train_target_mask]
@@ -758,7 +1333,14 @@ def rolling_renewable_generation_forecast(
             if len(X_train) < min_train_rows:
                 continue
 
-            y_model = _model_target_values(target, y_train, config, installed_capacity_mw)
+            y_model = _target_model_values_with_baseline(
+                target,
+                y_train,
+                X_train_all,
+                config,
+                installed_capacity_mw,
+                baseline_column,
+            )
             selected_features = _select_target_features(X_train, y_model, config)
             model = _make_model(config, target=target)
             model.fit(X_train[selected_features], y_model)
@@ -767,14 +1349,18 @@ def rolling_renewable_generation_forecast(
             pred_col = f"{output_name}_Model_MW"
             true_col = f"{output_name}_Actual_MW"
             upper_bound = _prediction_output_upper_bound(target, y_train, config, installed_capacity_mw)
-            output_upper_bounds[pred_col] = upper_bound
+            prediction_mw, baseline_values = _model_predictions_with_baseline_to_mw(
+                target,
+                model.predict(X_test.loc[:, selected_features]),
+                X_test,
+                config,
+                installed_capacity_mw,
+                baseline_column,
+            )
+            if baseline_values is not None:
+                day_forecast[f"{output_name}_Baseline_MW"] = np.clip(baseline_values, 0.0, upper_bound)
             day_forecast[pred_col] = np.clip(
-                _model_predictions_to_mw(
-                    target,
-                    model.predict(X_test.loc[:, selected_features]),
-                    config,
-                    installed_capacity_mw,
-                ),
+                prediction_mw,
                 0.0,
                 upper_bound,
             )
@@ -797,6 +1383,40 @@ def rolling_renewable_generation_forecast(
             )
         if "Wind_Total_Model_MW" in day_forecast.columns and "Wind_Total_Actual_MW" in dataset.columns:
             day_forecast["Wind_Total_Actual_MW"] = dataset.loc[test_mask, "Wind_Total_Actual_MW"]
+
+        solar_control_targets = [
+            target
+            for target in config.solar_control_area_targets
+            if target in target_columns
+        ]
+        solar_control_model_columns = [
+            f"{_target_output_name(target)}_Model_MW"
+            for target in solar_control_targets
+        ]
+        if solar_control_model_columns and set(solar_control_model_columns).issubset(day_forecast.columns):
+            day_forecast["Solar_Model_MW"] = day_forecast[solar_control_model_columns].sum(axis=1)
+            if "Solar_Actual_MW" in dataset.columns:
+                day_forecast["Solar_Actual_MW"] = dataset.loc[test_mask, "Solar_Actual_MW"]
+            else:
+                solar_control_actual_columns = [
+                    f"{_target_output_name(target)}_Actual_MW"
+                    for target in solar_control_targets
+                ]
+                if set(solar_control_actual_columns).issubset(day_forecast.columns):
+                    day_forecast["Solar_Actual_MW"] = day_forecast[solar_control_actual_columns].sum(axis=1)
+            _apply_rolling_bias_correction(
+                day_forecast,
+                forecast_blocks,
+                day=day,
+                pred_col="Solar_Model_MW",
+                true_col="Solar_Actual_MW",
+                upper_bound=_installed_capacity_for_target("Solar_Actual_MW", installed_capacity_mw),
+                config=config,
+                window_days=config.solar_total_bias_correction_window_days,
+                group=config.solar_total_bias_correction_group,
+                min_observations=config.solar_total_bias_correction_min_observations,
+                shrinkage=config.solar_total_bias_correction_shrinkage,
+            )
 
         if {"Solar_Model_MW", "Wind_Total_Model_MW"}.issubset(day_forecast.columns):
             day_forecast["Renewable_Total_Model_MW"] = (
@@ -874,10 +1494,17 @@ def _load_installed_capacity_denominators(config: RenewableGenerationModelConfig
     wind_onshore = 0.0
     wind_offshore = 0.0
     solar = 0.0
+    solar_region_aliases = {
+        "solar_50hertz": "Solar_50Hertz",
+        "solar_amprion": "Solar_Amprion",
+        "solar_tennet": "Solar_TenneT",
+        "solar_transnetbw": "Solar_TransnetBW",
+    }
     for row in summary:
         if not isinstance(row, dict):
             continue
         technology = str(row.get("technology_group", "")).lower()
+        region = str(row.get("region", "")).lower()
         capacity = float(row.get("capacity_mw", 0.0) or 0.0)
         if technology == "wind_onshore":
             wind_onshore += capacity
@@ -887,6 +1514,8 @@ def _load_installed_capacity_denominators(config: RenewableGenerationModelConfig
             wind += capacity
         elif technology == "solar":
             solar += capacity
+            if region in solar_region_aliases:
+                denominators[solar_region_aliases[region]] = capacity
 
     if wind_onshore > 0:
         denominators["Wind_Onshore"] = wind_onshore

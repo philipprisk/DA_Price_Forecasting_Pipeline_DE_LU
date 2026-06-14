@@ -13,6 +13,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 from shapely.geometry import Point, box
 from sklearn.cluster import KMeans
 import xarray as xr
@@ -171,6 +172,343 @@ def cluster_german_coordinates(
     return coords_germany, labels_ordered, centroids_sorted
 
 
+def _normalise_label(value: object) -> str:
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+_SOLAR_STATE_TSO_PROXY_REGIONS = {
+    # MaStR federal state codes. This is a state-level proxy for German
+    # solar control-area boundaries until a true TSO polygon source is added.
+    "1400": "solar_50hertz",  # Brandenburg
+    "1401": "solar_50hertz",  # Berlin
+    "1406": "solar_50hertz",  # Hamburg
+    "1407": "solar_50hertz",  # Mecklenburg-Vorpommern
+    "1413": "solar_50hertz",  # Sachsen
+    "1414": "solar_50hertz",  # Sachsen-Anhalt
+    "1415": "solar_50hertz",  # Thueringen
+    "1409": "solar_amprion",  # Nordrhein-Westfalen
+    "1410": "solar_amprion",  # Rheinland-Pfalz
+    "1412": "solar_amprion",  # Saarland
+    "1403": "solar_tennet",  # Bayern
+    "1404": "solar_tennet",  # Bremen
+    "1405": "solar_tennet",  # Hessen
+    "1408": "solar_tennet",  # Niedersachsen
+    "1411": "solar_tennet",  # Schleswig-Holstein
+    "1402": "solar_transnetbw",  # Baden-Wuerttemberg
+}
+
+_SOLAR_TSO_REGION_ORDER = [
+    "solar_50hertz",
+    "solar_amprion",
+    "solar_tennet",
+    "solar_transnetbw",
+]
+
+
+def _solar_tso_proxy_region(value: object) -> str | None:
+    if pd.isna(value):
+        return None
+    try:
+        state_code = str(int(float(value)))
+    except (TypeError, ValueError):
+        state_code = str(value).strip()
+    return _SOLAR_STATE_TSO_PROXY_REGIONS.get(state_code)
+
+
+def _load_capacity_points(
+    config: IconAggregationConfig,
+    *,
+    technology_values: list[str],
+    label: str,
+) -> pd.DataFrame:
+    capacity = pd.read_csv(config.capacity_file)
+    required = {
+        config.technology_column,
+        config.capacity_column,
+        config.latitude_column,
+        config.longitude_column,
+    }
+    missing = required - set(capacity.columns)
+    if missing:
+        raise ValueError(f"Capacity file is missing required columns: {sorted(missing)}")
+
+    selected_values = {_normalise_label(value) for value in technology_values}
+    capacity = capacity.copy()
+    capacity["_technology"] = capacity[config.technology_column].map(_normalise_label)
+    capacity = capacity.loc[capacity["_technology"].isin(selected_values)].copy()
+    capacity["capacity_mw"] = pd.to_numeric(capacity[config.capacity_column], errors="coerce")
+    capacity = capacity.dropna(subset=["capacity_mw", config.latitude_column, config.longitude_column])
+    capacity = capacity.loc[capacity["capacity_mw"] > 0].copy()
+
+    if config.operating_status_column in capacity.columns and config.active_status_codes:
+        active_codes = {str(code) for code in config.active_status_codes}
+        capacity = capacity.loc[capacity[config.operating_status_column].astype(str).isin(active_codes)].copy()
+
+    if capacity.empty:
+        raise ValueError(f"No active {label} capacity rows found for MaStR clustering.")
+
+    grouped = (
+        capacity
+        .groupby([config.latitude_column, config.longitude_column], as_index=False)
+        .agg(capacity_mw=("capacity_mw", "sum"))
+        .rename(columns={config.latitude_column: "lat", config.longitude_column: "lon"})
+    )
+    grouped = grouped.loc[grouped["capacity_mw"] > 0].copy()
+    return grouped.reset_index(drop=True)
+
+
+def _load_solar_capacity_points(config: IconAggregationConfig) -> pd.DataFrame:
+    return _load_capacity_points(config, technology_values=config.solar_values, label="solar")
+
+
+def _load_solar_tso_capacity_points(config: IconAggregationConfig) -> pd.DataFrame:
+    capacity = pd.read_csv(config.capacity_file)
+    required = {
+        config.technology_column,
+        config.capacity_column,
+        config.latitude_column,
+        config.longitude_column,
+        config.federal_state_column,
+    }
+    missing = required - set(capacity.columns)
+    if missing:
+        raise ValueError(f"Capacity file is missing required columns for TSO solar clustering: {sorted(missing)}")
+
+    selected_values = {_normalise_label(value) for value in config.solar_values}
+    capacity = capacity.copy()
+    capacity["_technology"] = capacity[config.technology_column].map(_normalise_label)
+    capacity = capacity.loc[capacity["_technology"].isin(selected_values)].copy()
+    capacity["capacity_mw"] = pd.to_numeric(capacity[config.capacity_column], errors="coerce")
+    capacity["tso_region"] = capacity[config.federal_state_column].map(_solar_tso_proxy_region)
+    capacity = capacity.dropna(
+        subset=["capacity_mw", config.latitude_column, config.longitude_column, "tso_region"]
+    )
+    capacity = capacity.loc[capacity["capacity_mw"] > 0].copy()
+
+    if config.operating_status_column in capacity.columns and config.active_status_codes:
+        active_codes = {str(code) for code in config.active_status_codes}
+        capacity = capacity.loc[capacity[config.operating_status_column].astype(str).isin(active_codes)].copy()
+
+    if capacity.empty:
+        raise ValueError("No active solar capacity rows with TSO proxy regions found for MaStR clustering.")
+
+    grouped = (
+        capacity
+        .groupby(["tso_region", config.latitude_column, config.longitude_column], as_index=False)
+        .agg(capacity_mw=("capacity_mw", "sum"))
+        .rename(columns={config.latitude_column: "lat", config.longitude_column: "lon"})
+    )
+    grouped = grouped.loc[grouped["capacity_mw"] > 0].copy()
+    return grouped.reset_index(drop=True)
+
+
+def _load_wind_capacity_points(config: IconAggregationConfig) -> pd.DataFrame:
+    wind_values = [*config.wind_onshore_values, *config.wind_offshore_values]
+    return _load_capacity_points(config, technology_values=wind_values, label="wind")
+
+
+def cluster_mastr_capacity_coordinates(
+    latitudes,
+    longitudes,
+    mask_grid,
+    config: IconAggregationConfig,
+    *,
+    technology: str,
+    capacity: pd.DataFrame,
+):
+    """Cluster DWD grid cells around MaStR capacity, weighted by installed MW."""
+    lon_grid, lat_grid = np.meshgrid(longitudes, latitudes)
+    coords_germany = np.column_stack([lon_grid[mask_grid], lat_grid[mask_grid]])
+    n_clusters = min(int(config.n_clusters), len(capacity))
+
+    unit_coords = capacity[["lon", "lat"]].to_numpy(dtype=float)
+    unit_weights = capacity["capacity_mw"].to_numpy(dtype=float)
+
+    print(
+        "Clustering "
+        f"{len(capacity):,} {technology} capacity coordinates into {n_clusters} MaStR-weighted clusters..."
+    )
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    km.fit(unit_coords, sample_weight=unit_weights)
+    centroids = km.cluster_centers_
+
+    sort_idx = np.argsort(centroids[:, 1])[::-1]
+    centroids_sorted = centroids[sort_idx]
+    center_tree = cKDTree(centroids_sorted)
+    _, labels_ordered = center_tree.query(coords_germany)
+    labels_ordered = labels_ordered.astype(int)
+
+    grid_tree = cKDTree(coords_germany)
+    _, nearest_grid_idx = grid_tree.query(unit_coords)
+    capacity_weights = np.bincount(
+        nearest_grid_idx,
+        weights=unit_weights,
+        minlength=len(coords_germany),
+    ).astype(float)
+
+    print(
+        "Mapped "
+        f"{capacity_weights.sum():,.1f} MW {technology} capacity to {np.count_nonzero(capacity_weights):,} "
+        "DWD grid cells for weighted aggregation."
+    )
+    return coords_germany, labels_ordered, centroids_sorted, capacity_weights
+
+
+def cluster_mastr_solar_capacity_coordinates(
+    latitudes,
+    longitudes,
+    mask_grid,
+    config: IconAggregationConfig,
+):
+    """Cluster DWD grid cells around MaStR solar capacity, weighted by installed MW."""
+    return cluster_mastr_capacity_coordinates(
+        latitudes,
+        longitudes,
+        mask_grid,
+        config,
+        technology="solar",
+        capacity=_load_solar_capacity_points(config),
+    )
+
+
+def cluster_mastr_solar_tso_capacity_coordinates(
+    latitudes,
+    longitudes,
+    mask_grid,
+    config: IconAggregationConfig,
+):
+    """Build separate MaStR solar-capacity clusters inside each TSO proxy region."""
+    lon_grid, lat_grid = np.meshgrid(longitudes, latitudes)
+    coords_germany = np.column_stack([lon_grid[mask_grid], lat_grid[mask_grid]])
+    capacity = _load_solar_tso_capacity_points(config)
+    n_per_region = int(config.n_clusters)
+
+    centroids_by_region: list[np.ndarray] = []
+    regions_by_cluster: list[str] = []
+    cluster_offset = 0
+    for region in _SOLAR_TSO_REGION_ORDER:
+        region_capacity = capacity.loc[capacity["tso_region"] == region].copy()
+        if region_capacity.empty:
+            continue
+        n_clusters = min(n_per_region, len(region_capacity))
+        unit_coords = region_capacity[["lon", "lat"]].to_numpy(dtype=float)
+        unit_weights = region_capacity["capacity_mw"].to_numpy(dtype=float)
+        print(
+            f"Clustering {len(region_capacity):,} {region} solar capacity coordinates into "
+            f"{n_clusters} MaStR-weighted clusters..."
+        )
+        km = KMeans(n_clusters=n_clusters, random_state=42 + cluster_offset, n_init="auto")
+        km.fit(unit_coords, sample_weight=unit_weights)
+        centroids = km.cluster_centers_
+        sort_idx = np.lexsort((centroids[:, 0], -centroids[:, 1]))
+        centroids_sorted = centroids[sort_idx]
+        centroids_by_region.append(centroids_sorted)
+        regions_by_cluster.extend([region] * len(centroids_sorted))
+        cluster_offset += len(centroids_sorted)
+
+    if not centroids_by_region:
+        raise ValueError("No TSO solar clusters could be built.")
+
+    centroids_all = np.vstack(centroids_by_region)
+    center_tree = cKDTree(centroids_all)
+    _, labels_ordered = center_tree.query(coords_germany)
+    labels_ordered = labels_ordered.astype(int)
+
+    grid_tree = cKDTree(coords_germany)
+    capacity_weights = np.zeros(len(coords_germany), dtype=float)
+    region_capacity_by_grid = {
+        region: np.zeros(len(coords_germany), dtype=float)
+        for region in _SOLAR_TSO_REGION_ORDER
+    }
+    centroids_by_region_with_ids = {
+        region: np.array(
+            [idx for idx, cluster_region in enumerate(regions_by_cluster) if cluster_region == region],
+            dtype=int,
+        )
+        for region in _SOLAR_TSO_REGION_ORDER
+    }
+
+    for region, region_capacity in capacity.groupby("tso_region", sort=False):
+        unit_coords = region_capacity[["lon", "lat"]].to_numpy(dtype=float)
+        unit_weights = region_capacity["capacity_mw"].to_numpy(dtype=float)
+        _, nearest_grid_idx = grid_tree.query(unit_coords)
+        region_capacity_by_grid[region] += np.bincount(
+            nearest_grid_idx,
+            weights=unit_weights,
+            minlength=len(coords_germany),
+        ).astype(float)
+        capacity_weights += np.bincount(
+            nearest_grid_idx,
+            weights=unit_weights,
+            minlength=len(coords_germany),
+        ).astype(float)
+
+    region_weight_matrix = np.vstack([region_capacity_by_grid[region] for region in _SOLAR_TSO_REGION_ORDER])
+    dominant_region_idx = region_weight_matrix.argmax(axis=0)
+    has_capacity = region_weight_matrix.sum(axis=0) > 0
+    for region_idx, region in enumerate(_SOLAR_TSO_REGION_ORDER):
+        grid_idx = np.flatnonzero(has_capacity & (dominant_region_idx == region_idx))
+        cluster_ids = centroids_by_region_with_ids.get(region)
+        if len(grid_idx) == 0 or cluster_ids is None or len(cluster_ids) == 0:
+            continue
+        tree = cKDTree(centroids_all[cluster_ids])
+        _, local_labels = tree.query(coords_germany[grid_idx])
+        labels_ordered[grid_idx] = cluster_ids[local_labels]
+
+    print(
+        "Mapped "
+        f"{capacity_weights.sum():,.1f} MW solar capacity to {np.count_nonzero(capacity_weights):,} "
+        f"DWD grid cells across {len(regions_by_cluster)} TSO-specific clusters."
+    )
+    return coords_germany, labels_ordered, centroids_all, capacity_weights, np.asarray(regions_by_cluster)
+
+
+def cluster_mastr_wind_capacity_coordinates(
+    latitudes,
+    longitudes,
+    mask_grid,
+    config: IconAggregationConfig,
+):
+    """Cluster DWD grid cells around MaStR wind capacity, weighted by installed MW."""
+    return cluster_mastr_capacity_coordinates(
+        latitudes,
+        longitudes,
+        mask_grid,
+        config,
+        technology="wind",
+        capacity=_load_wind_capacity_points(config),
+    )
+
+
+def save_cluster_map(
+    output_file: Path,
+    coords_germany: np.ndarray,
+    cluster_labels: np.ndarray,
+    capacity_weights: np.ndarray | None = None,
+    cluster_regions: np.ndarray | None = None,
+) -> None:
+    """Save the grid-cell-to-cluster mapping used for later renewable feature construction."""
+    data = {
+        "lon": coords_germany[:, 0],
+        "lat": coords_germany[:, 1],
+        "cluster_id": cluster_labels.astype(int),
+    }
+    if capacity_weights is not None:
+        data["capacity_weight_mw"] = capacity_weights
+    if cluster_regions is not None:
+        data["cluster_region"] = [
+            str(cluster_regions[int(cluster_id)])
+            for cluster_id in cluster_labels
+        ]
+    df = pd.DataFrame(data).sort_values(["cluster_id", "lat", "lon"]).reset_index(drop=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if output_file.suffix.lower() == ".parquet":
+        df.to_parquet(output_file, index=False)
+    else:
+        df.to_csv(output_file, index=False)
+    print(f"Saved cluster map: {output_file} ({len(df):,} grid cells)")
+
+
 def find_first_grib2_bz2(icon_run_dir: str) -> str | None:
     """Find any first GRIB2.bz2 file inside a run directory to read grid info."""
     var_dirs = sorted([d for d in glob.glob(os.path.join(icon_run_dir, "*")) if os.path.isdir(d)])
@@ -196,11 +534,37 @@ def read_grid_from_one_file(grib2_bz2_path: str):
     return np.array(lat), np.array(lon)
 
 
+def aggregate_cluster_values(
+    values: np.ndarray,
+    labels: np.ndarray,
+    n_clusters: int,
+    cluster_weights: np.ndarray | None = None,
+) -> np.ndarray:
+    """Aggregate one flattened weather field to clusters, optionally capacity-weighted."""
+    means = np.full(n_clusters, np.nan, dtype=float)
+    for cluster_id in range(n_clusters):
+        cmask = labels == cluster_id
+        if not np.any(cmask):
+            continue
+
+        cluster_values = values[cmask]
+        if cluster_weights is not None:
+            weights = cluster_weights[cmask]
+            valid = np.isfinite(cluster_values) & np.isfinite(weights) & (weights > 0)
+            if np.any(valid):
+                means[cluster_id] = np.average(cluster_values[valid], weights=weights[valid])
+                continue
+
+        means[cluster_id] = np.nanmean(cluster_values)
+    return means
+
+
 def process_variable_streaming(
     var_dir: str,
     mask_germany: np.ndarray,
     cluster_labels: np.ndarray,
     output_dir: str,
+    cluster_weights: np.ndarray | None = None,
     skip_existing: bool = True,
 ):
     """Stream one variable folder and write a single aggregated CSV."""
@@ -277,12 +641,12 @@ def process_variable_streaming(
 
                 slice_2d = arr_3d[idx, :, :]
                 slice_flat_germany = slice_2d.reshape(-1)[mask_flat]
-
-                means = np.full(n_clusters, np.nan, dtype=float)
-                for cluster_id in range(n_clusters):
-                    cmask = labels == cluster_id
-                    if np.any(cmask):
-                        means[cluster_id] = np.nanmean(slice_flat_germany[cmask])
+                means = aggregate_cluster_values(
+                    slice_flat_germany,
+                    labels,
+                    n_clusters,
+                    cluster_weights=cluster_weights,
+                )
 
                 cluster_series.append(means)
                 del slice_2d, slice_flat_germany, means
@@ -394,6 +758,9 @@ def run_aggregation(config: IconAggregationConfig) -> None:
 
     mask_germany = None
     cluster_labels = None
+    cluster_weights = None
+    coords_germany = None
+    cluster_regions = None
     latitude = None
     longitude = None
 
@@ -432,15 +799,60 @@ def run_aggregation(config: IconAggregationConfig) -> None:
                 )
 
                 print("Computing KMeans clusters...")
-                _, cluster_labels, _ = cluster_german_coordinates(
-                    latitude,
-                    longitude,
-                    mask_germany,
-                    config.shapefile_path,
-                    n_clusters=config.n_clusters,
-                    random_state=42,
-                    plot=config.plot_clusters,
-                )
+                if config.cluster_source == "grid":
+                    coords_germany, cluster_labels, _ = cluster_german_coordinates(
+                        latitude,
+                        longitude,
+                        mask_germany,
+                        config.shapefile_path,
+                        n_clusters=config.n_clusters,
+                        random_state=42,
+                        plot=config.plot_clusters,
+                    )
+                    cluster_weights = None
+                elif config.cluster_source == "mastr_solar":
+                    coords_germany, cluster_labels, _, capacity_weights = cluster_mastr_solar_capacity_coordinates(
+                        latitude,
+                        longitude,
+                        mask_germany,
+                        config,
+                    )
+                    cluster_weights = capacity_weights if config.capacity_weighted_aggregation else None
+                    cluster_regions = None
+                elif config.cluster_source == "mastr_solar_tso":
+                    (
+                        coords_germany,
+                        cluster_labels,
+                        _,
+                        capacity_weights,
+                        cluster_regions,
+                    ) = cluster_mastr_solar_tso_capacity_coordinates(
+                        latitude,
+                        longitude,
+                        mask_germany,
+                        config,
+                    )
+                    cluster_weights = capacity_weights if config.capacity_weighted_aggregation else None
+                elif config.cluster_source == "mastr_wind":
+                    coords_germany, cluster_labels, _, capacity_weights = cluster_mastr_wind_capacity_coordinates(
+                        latitude,
+                        longitude,
+                        mask_germany,
+                        config,
+                    )
+                    cluster_weights = capacity_weights if config.capacity_weighted_aggregation else None
+                    cluster_regions = None
+                else:
+                    raise ValueError(f"Unsupported ICON cluster_source: {config.cluster_source!r}")
+
+                if config.cluster_output_file is not None and coords_germany is not None:
+                    save_cluster_map(
+                        config.cluster_output_file,
+                        coords_germany,
+                        cluster_labels,
+                        capacity_weights if config.cluster_source in {"mastr_solar", "mastr_solar_tso", "mastr_wind"} else None,
+                        cluster_regions=cluster_regions,
+                    )
             else:
                 print("Reusing existing grid, mask, and clusters.")
 
@@ -449,7 +861,15 @@ def run_aggregation(config: IconAggregationConfig) -> None:
 
             var_dirs = sorted([directory for directory in glob.glob(os.path.join(icon_dir, "*")) if os.path.isdir(directory)])
             if config.variables is not None:
-                var_dirs = [directory for directory in var_dirs if os.path.basename(directory) in set(config.variables)]
+                requested_variables = set(config.variables)
+                available_variables = {os.path.basename(directory) for directory in var_dirs}
+                missing_variables = sorted(requested_variables - available_variables)
+                if missing_variables:
+                    print(
+                        "Requested variable folders not found in "
+                        f"{day_name}/{run_hour}: {', '.join(missing_variables)}"
+                    )
+                var_dirs = [directory for directory in var_dirs if os.path.basename(directory) in requested_variables]
 
             print(f"Found {len(var_dirs)} variable folders to process in {day_name}/{run_hour}.")
             for var_dir in var_dirs:
@@ -459,6 +879,7 @@ def run_aggregation(config: IconAggregationConfig) -> None:
                         mask_germany=mask_germany,
                         cluster_labels=cluster_labels,
                         output_dir=output_dir,
+                        cluster_weights=cluster_weights,
                         skip_existing=config.skip_existing_output,
                     )
                 except Exception as exc:

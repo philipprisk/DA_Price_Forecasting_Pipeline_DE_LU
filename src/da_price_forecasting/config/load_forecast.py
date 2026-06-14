@@ -149,6 +149,10 @@ class LoadForecastModelConfig(RepoConfigModel):
     dwd_icon_aggregation_shapefile_path: Path = Path("data/shapefile/ne_10m_admin_0_countries.shp")
     dwd_icon_aggregation_n_clusters: int | None = None
     dwd_icon_aggregation_buffer_km: int = 50
+    dwd_icon_aggregation_cluster_source: Literal["grid", "mastr_solar", "mastr_solar_tso", "mastr_wind"] = "grid"
+    dwd_icon_aggregation_cluster_output_file: Path | None = None
+    dwd_icon_aggregation_capacity_file: Path = Path("data/raw/renewable_capacity/installed_capacity.csv")
+    dwd_icon_aggregation_capacity_weighted: bool = True
 
     model_type: Literal["hist_gradient_boosting", "lightgbm", "ridge"] = "hist_gradient_boosting"
     model_granularity: Literal["global", "hour_block"] = "global"
@@ -491,6 +495,12 @@ class LoadForecastModelConfig(RepoConfigModel):
         self.icon_dir = resolve_path(self.icon_dir, self.repo_root)
         self.dwd_icon_raw_dir = resolve_path(self.dwd_icon_raw_dir, self.repo_root)
         self.dwd_icon_aggregation_shapefile_path = resolve_path(self.dwd_icon_aggregation_shapefile_path, self.repo_root)
+        self.dwd_icon_aggregation_capacity_file = resolve_path(self.dwd_icon_aggregation_capacity_file, self.repo_root)
+        if self.dwd_icon_aggregation_cluster_output_file is not None:
+            self.dwd_icon_aggregation_cluster_output_file = resolve_path(
+                self.dwd_icon_aggregation_cluster_output_file,
+                self.repo_root,
+            )
         self.open_meteo_weather_file = resolve_path(self.open_meteo_weather_file, self.repo_root)
         self.open_meteo_cluster_file = resolve_path(self.open_meteo_cluster_file, self.repo_root)
         self.export_dir = resolve_path(self.export_dir, self.repo_root)

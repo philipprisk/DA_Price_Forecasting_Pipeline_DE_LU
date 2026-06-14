@@ -31,6 +31,10 @@ config:
   dwd_icon_raw_dir: "{tmp_path / 'raw_dwd'}"
   dwd_icon_catch_up_missing_days: false
   dwd_icon_aggregation_n_clusters: 25
+  dwd_icon_aggregation_cluster_source: mastr_solar_tso
+  dwd_icon_aggregation_cluster_output_file: "{tmp_path / 'clusters.csv'}"
+  dwd_icon_aggregation_capacity_file: "{tmp_path / 'capacity.csv'}"
+  dwd_icon_aggregation_capacity_weighted: true
   dwd_icon_aggregation_shapefile_path: "{tmp_path / 'countries.shp'}"
 """.lstrip(),
         encoding="utf-8",
@@ -54,3 +58,7 @@ config:
     assert calls["run_hour"] == "06"
     assert calls["catch_up_missing_days"] is False
     assert calls["n_clusters"] == 25
+    assert calls["cluster_source"] == "mastr_solar_tso"
+    assert calls["cluster_output_file"] == tmp_path / "clusters.csv"
+    assert calls["capacity_file"] == tmp_path / "capacity.csv"
+    assert calls["capacity_weighted_aggregation"] is True

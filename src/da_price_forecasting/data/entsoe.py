@@ -7,6 +7,13 @@ import pandas as pd
 from entsoe import EntsoePandasClient, EntsoeRawClient
 from entsoe.parsers import parse_prices
 
+SOLAR_CONTROL_AREA_TARGETS = {
+    "Solar_50Hertz_Actual_MW": "10YDE-VE-------2",
+    "Solar_Amprion_Actual_MW": "10YDE-RWENET---I",
+    "Solar_TenneT_Actual_MW": "10YDE-EON------1",
+    "Solar_TransnetBW_Actual_MW": "10YDE-ENBW-----N",
+}
+
 
 def _require_api_key(env_var: str) -> str:
     api_key = os.getenv(env_var)
@@ -331,6 +338,57 @@ def fetch_actual_renewable_generation(
         axis=1,
         min_count=2,
     )
+    return _restrict_calendar_window(result, start_day, end_day, target_tz)
+
+
+def fetch_actual_solar_generation_by_control_area(
+    start_day: pd.Timestamp,
+    end_day: pd.Timestamp,
+    control_area_targets: dict[str, str] | None = None,
+    api_key_env: str = "ENTSOE_API_KEY",
+    target_tz: str = "Europe/Berlin",
+    chunk_days: int = 90,
+) -> pd.DataFrame:
+    """Fetch actual solar generation for German TSO control areas."""
+    client = EntsoePandasClient(api_key=_require_api_key(api_key_env))
+    start_day = _as_target_tz(start_day, target_tz)
+    end_day = _as_target_tz(end_day, target_tz)
+    targets = control_area_targets or SOLAR_CONTROL_AREA_TARGETS
+    frames = []
+
+    for column, country_code in targets.items():
+        series_parts = []
+        current_start = start_day.normalize()
+        while current_start <= end_day:
+            current_end = min(current_start + pd.Timedelta(days=chunk_days - 1), end_day)
+            query_start = current_start.tz_convert(target_tz)
+            query_end = (current_end + pd.Timedelta(days=1)).tz_convert(target_tz)
+
+            obj = client.query_generation(
+                country_code=country_code,
+                start=query_start,
+                end=query_end,
+                psr_type="B16",
+                nett=False,
+            )
+            if obj is not None and not obj.empty:
+                series = _first_numeric_series(obj, f"{column} generation")
+                if getattr(series.index, "tz", None) is None:
+                    series = series.tz_localize("UTC")
+                series_parts.append(series.tz_convert(target_tz).rename(column))
+
+            current_start = current_end + pd.Timedelta(days=1)
+
+        if not series_parts:
+            raise ValueError(f"No actual solar generation data returned for {country_code} ({column}).")
+
+        raw_series = pd.concat(series_parts).sort_index()
+        raw_series = raw_series[~raw_series.index.duplicated(keep="last")]
+        frames.append(_expand_hourly_series_to_quarter_hour(raw_series, target_tz=target_tz, value_name=column))
+
+    result = pd.concat(frames, axis=1).sort_index()
+    if set(targets).issubset(result.columns):
+        result["Solar_Control_Area_Total_Actual_MW"] = result[list(targets)].sum(axis=1, min_count=len(targets))
     return _restrict_calendar_window(result, start_day, end_day, target_tz)
 
 

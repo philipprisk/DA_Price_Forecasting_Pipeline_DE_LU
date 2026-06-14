@@ -8,7 +8,11 @@ import pytest
 import requests
 
 from da_price_forecasting.data import weather
-from da_price_forecasting.data.weather import _fetch_open_meteo_batch, fetch_open_meteo_cluster_weather
+from da_price_forecasting.data.weather import (
+    _fetch_open_meteo_batch,
+    fetch_open_meteo_cluster_weather,
+    fetch_open_meteo_point_weather,
+)
 
 
 class _OpenMeteoResponse:
@@ -123,3 +127,56 @@ def test_single_run_backfill_preserves_existing_cache_days(
     cached_days = {timestamp.date().isoformat() for timestamp in cached.index.normalize()}
 
     assert cached_days == {"2026-03-20", "2026-03-21"}
+
+
+def test_single_run_point_weather_keeps_point_level_columns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    points = pd.DataFrame(
+        {
+            "weather_point_id": [0, 1],
+            "lat": [52.0, 53.0],
+            "lon": [8.0, 9.0],
+        }
+    )
+    cache_file = tmp_path / "open_meteo_points.csv"
+
+    def fake_fetch_open_meteo_batch(**kwargs):  # noqa: ANN003, ARG001
+        return [
+            {
+                "hourly": {
+                    "time": ["2026-03-20T23:00"],
+                    "temperature_2m": [10.0],
+                    "diffuse_radiation": [12.0],
+                }
+            },
+            {
+                "hourly": {
+                    "time": ["2026-03-20T23:00"],
+                    "temperature_2m": [20.0],
+                    "diffuse_radiation": [24.0],
+                }
+            },
+        ]
+
+    monkeypatch.setattr(weather, "_fetch_open_meteo_batch", fake_fetch_open_meteo_batch)
+
+    result = fetch_open_meteo_point_weather(
+        points=points,
+        start_date=date(2026, 3, 21),
+        end_date=date(2026, 3, 21),
+        output_file=cache_file,
+        hourly_variables=["temperature_2m", "diffuse_radiation"],
+        batch_size=2,
+        target_tz="Europe/Berlin",
+        api_mode="single_run",
+        single_run_hour_utc="06:00",
+    )
+
+    assert "t2m_point_0" in result.columns
+    assert "t2m_point_1" in result.columns
+    assert "diffuse_point_0" in result.columns
+    assert result["t2m_point_0"].iloc[0] == 283.15
+    assert result["t2m_point_1"].iloc[0] == 293.15
+    assert cache_file.exists()
