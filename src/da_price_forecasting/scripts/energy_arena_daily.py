@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from ..config import LearOperationalConfig, RunConfig, SqraConfig, load_config_payload, validate_config_payload
+from ..features.engineering import build_y_matrix
 from ..integrations.energy_arena.formatters import build_model_metadata
 from ..paths import find_repo_root, resolve_path
 from .run import run_from_config
@@ -281,6 +282,47 @@ def _validate_point_base_dataset(
         )
 
 
+def _with_latest_available_feature_day_fallback(
+    dataset: dict[str, Any],
+    forecast_day: pd.Timestamp,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    X = dataset["X"]
+    if X.empty:
+        return dataset, None
+
+    available_days = pd.DatetimeIndex(X.index).normalize().unique().sort_values()
+    if forecast_day in available_days:
+        return dataset, None
+
+    donor_candidates = available_days[available_days < forecast_day]
+    if donor_candidates.empty:
+        return dataset, None
+
+    donor_day = donor_candidates.max()
+    donor_row = X.loc[[donor_day]].iloc[0].copy()
+    donor_row.name = forecast_day
+    X_fallback = pd.concat([X, donor_row.to_frame().T]).sort_index()
+    X_fallback = X_fallback.loc[~X_fallback.index.duplicated(keep="last")]
+
+    prices = dataset.get("prices")
+    if isinstance(prices, pd.DataFrame) and not prices.empty:
+        Y_fallback = build_y_matrix(prices, pd.DatetimeIndex(X_fallback.index))
+    else:
+        Y_fallback = dataset["Y"].reindex(X_fallback.index)
+
+    fallback_info = {
+        "type": "latest_available_feature_day",
+        "target_day": forecast_day.date().isoformat(),
+        "donor_day": donor_day.date().isoformat(),
+        "reason": "target feature day missing",
+    }
+    updated = dict(dataset)
+    updated["X"] = X_fallback
+    updated["Y"] = Y_fallback
+    updated["fallback"] = fallback_info
+    return updated, fallback_info
+
+
 def run_point_base_forecasts(
     lear_config: LearOperationalConfig,
     forecast_date: date,
@@ -294,6 +336,15 @@ def run_point_base_forecasts(
     forecast_days = daily_forecast_days(forecast_date, history_days, lear_config.target_tz)
 
     dataset = prepare_lear_operational_prediction_dataset(config=lear_config, forecast_date=forecast_day)
+    dataset, fallback_info = _with_latest_available_feature_day_fallback(dataset, forecast_day)
+    if fallback_info is not None:
+        print(
+            "[Fallback] Missing EXAA-only feature row for "
+            f"{fallback_info['target_day']}; using latest available feature profile "
+            f"from {fallback_info['donor_day']}.",
+            flush=True,
+        )
+
     _validate_point_base_dataset(
         X=dataset["X"],
         forecast_days=forecast_days,
@@ -320,6 +371,7 @@ def run_point_base_forecasts(
             "forecast_date": forecast_day.date().isoformat(),
             "history_days": history_days,
             "model_metadata": build_model_metadata(lear_config),
+            "fallback": fallback_info,
         },
         export_dir=export_dir,
     )

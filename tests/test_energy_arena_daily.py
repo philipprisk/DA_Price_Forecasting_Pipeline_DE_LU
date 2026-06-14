@@ -12,6 +12,7 @@ from da_price_forecasting.scripts.energy_arena_daily import (
     _parse_retry_until,
     _retry_deadline,
     _validate_point_base_dataset,
+    _with_latest_available_feature_day_fallback,
     build_point_submission_payload,
     build_quantile_submission_payload,
     daily_forecast_days,
@@ -197,3 +198,38 @@ def test_target_feature_day_without_training_rows_raises_actionable_error() -> N
             forecast_day=forecast_day,
             train_days=56,
         )
+
+
+def test_latest_available_feature_day_fallback_adds_missing_target_day() -> None:
+    index = pd.DatetimeIndex(["2026-04-27", "2026-04-28"], tz="Europe/Berlin")
+    target_day = pd.Timestamp("2026-04-29", tz="Europe/Berlin")
+    X = pd.DataFrame(
+        {
+            "exaa_d0_mtu_00": [10.0, 20.0],
+            "exaa_d0_mtu_01": [11.0, 21.0],
+        },
+        index=index,
+    )
+    Y = pd.DataFrame({0: [1.0, 2.0], 1: [3.0, 4.0]}, index=index)
+    price_index = pd.date_range("2026-04-27T00:00:00+02:00", periods=2 * 96, freq="15min")
+    prices = pd.DataFrame({"price_da": range(len(price_index))}, index=price_index)
+
+    updated, fallback_info = _with_latest_available_feature_day_fallback(
+        {"X": X, "Y": Y, "prices": prices},
+        target_day,
+    )
+
+    assert fallback_info == {
+        "type": "latest_available_feature_day",
+        "target_day": "2026-04-29",
+        "donor_day": "2026-04-28",
+        "reason": "target feature day missing",
+    }
+    assert target_day in updated["X"].index
+    pd.testing.assert_series_equal(
+        updated["X"].loc[target_day],
+        X.loc[pd.Timestamp("2026-04-28", tz="Europe/Berlin")],
+        check_names=False,
+    )
+    assert updated["Y"].index.equals(updated["X"].index)
+    assert updated["Y"].loc[target_day].isna().all()
