@@ -19,7 +19,7 @@ from ..config import (
     load_config_payload,
     validate_config_payload,
 )
-from ..data.entsoe import fetch_actual_renewable_generation
+from ..data.entsoe import fetch_actual_renewable_generation, fetch_actual_solar_generation_by_control_area
 from ..paths import find_repo_root, resolve_path
 from ..pipelines.common import load_timestamp_csv, save_timestamp_csv
 from .run import run_from_config
@@ -51,6 +51,9 @@ class DailyRenewablePaths:
     @property
     def feature_config(self) -> Path:
         return self.generated_config_dir / "regional_renewable_features.generated.yaml"
+
+    def extra_feature_config(self, index: int) -> Path:
+        return self.generated_config_dir / f"regional_renewable_features_extra_{index}.generated.yaml"
 
     @property
     def model_config(self) -> Path:
@@ -159,7 +162,8 @@ def build_renewable_feature_payload(
         raise ValueError(f"Expected regional_renewable_features config, got {payload.get('kind')!r}.")
 
     config = _nested_config(payload)
-    config["open_meteo_end_date"] = forecast_date.isoformat()
+    if config.get("weather_source", "open_meteo") == "open_meteo" or "open_meteo_end_date" in config:
+        config["open_meteo_end_date"] = forecast_date.isoformat()
     return payload
 
 
@@ -226,6 +230,15 @@ def update_actual_generation_cache(
             api_key_env=config.entsoe_api_key_env,
             target_tz=config.target_tz,
         )
+        if config.include_solar_control_area_targets:
+            control_area_actual = fetch_actual_solar_generation_by_control_area(
+                start_day=pd.Timestamp(fetch_start_day, tz=config.target_tz),
+                end_day=pd.Timestamp(target_end_day, tz=config.target_tz),
+                control_area_targets=config.solar_control_area_targets,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+            )
+            fetched = fetched.join(control_area_actual, how="outer")
     except Exception as exc:
         if existing is not None and not existing.empty:
             print(
@@ -287,6 +300,7 @@ def build_renewable_submission_payload(
 def run_daily_renewable_energy_arena(
     *,
     feature_config_path: Path = DEFAULT_FEATURE_CONFIG,
+    extra_feature_config_paths: list[Path] | None = None,
     model_config_path: Path = DEFAULT_MODEL_CONFIG,
     solar_challenge_id: int | None = None,
     wind_challenge_id: int | None = None,
@@ -334,6 +348,25 @@ def run_daily_renewable_energy_arena(
     feature_config = _feature_config_from_payload(feature_payload, repo_root)
     _write_yaml(paths.feature_config, feature_payload)
     run_from_config(validate_config_payload(feature_payload, RunConfig, repo_root=repo_root))
+
+    extra_feature_runs = []
+    for index, extra_feature_config_path in enumerate(extra_feature_config_paths or [], start=1):
+        extra_feature_payload = build_renewable_feature_payload(
+            feature_config_path=extra_feature_config_path,
+            forecast_date=day,
+            repo_root=repo_root,
+        )
+        extra_feature_config = _feature_config_from_payload(extra_feature_payload, repo_root)
+        generated_extra_feature_config = paths.extra_feature_config(index)
+        _write_yaml(generated_extra_feature_config, extra_feature_payload)
+        run_from_config(validate_config_payload(extra_feature_payload, RunConfig, repo_root=repo_root))
+        extra_feature_runs.append(
+            {
+                "feature_config_path": str(extra_feature_config_path),
+                "generated_feature_config": str(generated_extra_feature_config),
+                "output_file": str(extra_feature_config.output_file),
+            }
+        )
 
     model_payload = build_renewable_model_payload(
         model_config_path=model_config_path,
@@ -399,6 +432,7 @@ def run_daily_renewable_energy_arena(
                 "forecast_date": day.isoformat(),
                 "submit": submit,
                 "feature_config_path": str(feature_config_path),
+                "extra_feature_runs": extra_feature_runs,
                 "model_config_path": str(model_config_path),
                 "generated_feature_config": str(paths.feature_config),
                 "generated_model_config": str(paths.model_config),
@@ -431,6 +465,7 @@ def _retry_deadline(now: datetime, retry_until: datetime_time | None, target_tz:
 def run_daily_renewable_energy_arena_with_retries(
     *,
     feature_config_path: Path,
+    extra_feature_config_paths: list[Path] | None,
     model_config_path: Path,
     solar_challenge_id: int | None,
     wind_challenge_id: int | None,
@@ -459,6 +494,7 @@ def run_daily_renewable_energy_arena_with_retries(
         try:
             return run_daily_renewable_energy_arena(
                 feature_config_path=feature_config_path,
+                extra_feature_config_paths=extra_feature_config_paths,
                 model_config_path=model_config_path,
                 solar_challenge_id=solar_challenge_id,
                 wind_challenge_id=wind_challenge_id,
@@ -498,6 +534,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the daily Energy Arena solar/wind renewable generation submission workflow."
     )
     parser.add_argument("--feature-config", type=Path, default=DEFAULT_FEATURE_CONFIG)
+    parser.add_argument(
+        "--extra-feature-config",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional regional renewable feature config to refresh before running the model. Can be passed multiple times.",
+    )
     parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG)
     parser.add_argument("--solar-challenge-id", type=int, default=None)
     parser.add_argument("--wind-challenge-id", type=int, default=None)
@@ -524,6 +567,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     run_daily_renewable_energy_arena_with_retries(
         feature_config_path=args.feature_config,
+        extra_feature_config_paths=args.extra_feature_config,
         model_config_path=args.model_config,
         solar_challenge_id=args.solar_challenge_id,
         wind_challenge_id=args.wind_challenge_id,
