@@ -67,6 +67,7 @@ class LoadForecastModelConfig(RepoConfigModel):
     include_weighted_weather_daily_features: bool = False
     include_weighted_weather_inertia_features: bool = False
     include_weather_cluster_spread_features: bool = False
+    include_weighted_weather_quantile_features: bool = False
     include_weather_time_interactions: bool = False
     include_regional_holiday_features: bool = False
     include_partial_load_features: bool = False
@@ -92,6 +93,8 @@ class LoadForecastModelConfig(RepoConfigModel):
     weighted_weather_inertia_stats: list[str] = Field(default_factory=lambda: ["mean", "delta_mean"])
     weather_spread_feature_bases: list[str] = Field(default_factory=list)
     weather_spread_stats: list[str] = Field(default_factory=lambda: ["min", "max", "range", "std"])
+    weighted_weather_quantile_feature_bases: list[str] = Field(default_factory=list)
+    weighted_weather_quantiles: list[float] = Field(default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9])
     weather_hdd_thresholds: list[float] = Field(default_factory=lambda: [18.0])
     weather_cdd_thresholds: list[float] = Field(default_factory=lambda: [22.0])
     keep_weather_cluster_features: bool = True
@@ -264,6 +267,15 @@ class LoadForecastModelConfig(RepoConfigModel):
             return [value]
         return [str(item) for item in value]
 
+    @field_validator("weighted_weather_quantile_feature_bases", mode="before")
+    @classmethod
+    def _coerce_weighted_weather_quantile_feature_bases(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
     @field_validator("weighted_weather_daily_stats", mode="before")
     @classmethod
     def _coerce_weighted_daily_stats(cls, value: Any) -> list[str]:
@@ -343,6 +355,15 @@ class LoadForecastModelConfig(RepoConfigModel):
             return [float(value)]
         return [float(item) for item in value]
 
+    @field_validator("weighted_weather_quantiles", mode="before")
+    @classmethod
+    def _coerce_weighted_weather_quantiles(cls, value: Any) -> list[float]:
+        if value is None:
+            return []
+        if isinstance(value, (int, float)):
+            return [float(value)]
+        return [float(item) for item in value]
+
     @model_validator(mode="after")
     def _resolve_paths(self) -> "LoadForecastModelConfig":
         if self.chunk_days < 1:
@@ -401,6 +422,10 @@ class LoadForecastModelConfig(RepoConfigModel):
             raise ValueError("include_weighted_weather_inertia_features requires include_weighted_weather_features.")
         if self.include_weather_cluster_spread_features and not self.include_weather_features:
             raise ValueError("include_weather_cluster_spread_features requires include_weather_features.")
+        if self.include_weighted_weather_quantile_features and not self.include_weather_features:
+            raise ValueError("include_weighted_weather_quantile_features requires include_weather_features.")
+        if self.include_weighted_weather_quantile_features and self.weather_cluster_weight_file is None:
+            raise ValueError("weather_cluster_weight_file is required for weighted weather quantiles.")
         if self.include_regional_holiday_features and self.regional_holiday_weight_file is None:
             raise ValueError("regional_holiday_weight_file is required when include_regional_holiday_features is true.")
         if not self.weather_cluster_id_column:
@@ -439,6 +464,8 @@ class LoadForecastModelConfig(RepoConfigModel):
         unknown_spread_stats = set(self.weather_spread_stats) - valid_spread_stats
         if unknown_spread_stats:
             raise ValueError(f"weather_spread_stats contains unsupported stats: {sorted(unknown_spread_stats)}")
+        if any(quantile <= 0.0 or quantile >= 1.0 for quantile in self.weighted_weather_quantiles):
+            raise ValueError("weighted_weather_quantiles must be between 0 and 1.")
         for point_time in self.partial_load_point_times:
             parts = point_time.split(":")
             if len(parts) != 2:

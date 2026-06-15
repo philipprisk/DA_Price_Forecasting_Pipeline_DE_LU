@@ -974,6 +974,84 @@ def _add_weather_cluster_spread_features(
     return result.loc[:, ~result.columns.duplicated()]
 
 
+def _weighted_quantile_row(values: np.ndarray, weights: np.ndarray, quantile: float) -> float:
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not mask.any():
+        return np.nan
+    valid_values = values[mask]
+    valid_weights = weights[mask]
+    order = np.argsort(valid_values)
+    sorted_values = valid_values[order]
+    sorted_weights = valid_weights[order]
+    cutoff = float(quantile) * sorted_weights.sum()
+    index = int(np.searchsorted(np.cumsum(sorted_weights), cutoff, side="left"))
+    return float(sorted_values[min(index, len(sorted_values) - 1)])
+
+
+def _quantile_label(quantile: float) -> str:
+    return f"q{int(round(float(quantile) * 100)):02d}"
+
+
+def _weather_cluster_columns(
+    features: pd.DataFrame,
+    *,
+    base_names: list[str] | None = None,
+) -> dict[str, list[tuple[int, str]]]:
+    allowed_base_names = _normalise_weather_base_names(base_names)
+    grouped_columns: dict[str, list[tuple[int, str]]] = {}
+    for column in features.columns:
+        parsed = _split_weather_cluster_column(column)
+        if parsed is None:
+            continue
+        base_name, cluster_id = parsed
+        if allowed_base_names is not None and base_name not in allowed_base_names:
+            continue
+        grouped_columns.setdefault(base_name, []).append((cluster_id, column))
+    return {
+        base_name: sorted(cluster_columns)
+        for base_name, cluster_columns in grouped_columns.items()
+        if cluster_columns
+    }
+
+
+def _add_weighted_weather_quantile_features(
+    features: pd.DataFrame,
+    cluster_weights: pd.Series,
+    *,
+    base_names: list[str] | None = None,
+    quantiles: list[float] | None = None,
+    prefix: str = "weather_weighted_q",
+) -> pd.DataFrame:
+    if features.empty or cluster_weights.empty:
+        return features
+
+    requested_quantiles = sorted({float(quantile) for quantile in (quantiles or [0.1, 0.5, 0.9])})
+    quantile_data: dict[str, list[float]] = {}
+    for base_name, cluster_columns in _weather_cluster_columns(features, base_names=base_names).items():
+        available = [
+            (cluster_id, column)
+            for cluster_id, column in cluster_columns
+            if cluster_id in cluster_weights.index
+        ]
+        if not available:
+            continue
+        columns = [column for _, column in available]
+        weights = np.array([float(cluster_weights.loc[cluster_id]) for cluster_id, _ in available], dtype=float)
+        values = features[columns].to_numpy(dtype=float)
+        output_base = base_name.removeprefix("weather_")
+        for quantile in requested_quantiles:
+            quantile_data[f"{prefix}_{output_base}_{_quantile_label(quantile)}"] = [
+                _weighted_quantile_row(row, weights, quantile)
+                for row in values
+            ]
+
+    if not quantile_data:
+        return features
+    quantile_features = pd.DataFrame(quantile_data, index=features.index)
+    result = pd.concat([features, quantile_features], axis=1)
+    return result.loc[:, ~result.columns.duplicated()]
+
+
 def _add_weighted_weather_inertia_features(
     features: pd.DataFrame,
     *,
@@ -1368,20 +1446,38 @@ def build_load_forecast_dataset(config: LoadForecastModelConfig) -> pd.DataFrame
             base_names=config.weather_spread_feature_bases or config.weather_weighted_feature_bases,
             stats=config.weather_spread_stats,
         )
-    if config.include_weighted_weather_features:
+    cluster_weights = None
+    needs_cluster_weights = (
+        config.include_weighted_weather_features
+        or config.include_weighted_weather_quantile_features
+    )
+    if needs_cluster_weights:
         if config.weather_cluster_weight_file is None:
-            raise ValueError("weather_cluster_weight_file is required when include_weighted_weather_features is true.")
+            raise ValueError("weather_cluster_weight_file is required for weighted weather features.")
         cluster_weights = _load_cluster_weights(
             config.weather_cluster_weight_file,
             cluster_id_column=config.weather_cluster_id_column,
             weight_column=config.weather_cluster_weight_column,
         )
+    if config.include_weighted_weather_quantile_features:
+        if cluster_weights is None:
+            raise ValueError("Weighted weather quantile features require cluster weights.")
+        features = _add_weighted_weather_quantile_features(
+            features,
+            cluster_weights,
+            base_names=config.weighted_weather_quantile_feature_bases or config.weather_spread_feature_bases,
+            quantiles=config.weighted_weather_quantiles,
+        )
+    if config.include_weighted_weather_features:
+        if cluster_weights is None:
+            raise ValueError("Weighted weather features require cluster weights.")
         features = _add_weighted_weather_features(
             features,
             cluster_weights,
             prefix=config.weather_weighted_feature_prefix,
             base_names=config.weather_weighted_feature_bases,
         )
+    if config.include_weighted_weather_features:
         if config.include_weighted_weather_daily_features:
             features = _add_weighted_weather_daily_features(
                 features,

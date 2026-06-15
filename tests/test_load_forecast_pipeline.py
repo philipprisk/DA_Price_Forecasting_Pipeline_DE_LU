@@ -589,6 +589,30 @@ def test_weather_cluster_spread_features_add_cross_cluster_stats() -> None:
     assert np.isclose(result.loc[index[1], "weather_spread_t2m_C_p90"], 38.0)
 
 
+def test_weighted_weather_quantile_features_use_population_weights() -> None:
+    index = pd.date_range("2026-01-01T00:00:00+01:00", periods=2, freq="15min")
+    features = pd.DataFrame(
+        {
+            "weather_t2m_C_cluster_0": [10.0, 20.0],
+            "weather_t2m_C_cluster_1": [20.0, 40.0],
+            "weather_t2m_C_cluster_2": [30.0, 60.0],
+        },
+        index=index,
+    )
+    weights = pd.Series({0: 1.0, 1: 1.0, 2: 8.0})
+
+    result = lf._add_weighted_weather_quantile_features(
+        features,
+        weights,
+        base_names=["t2m_C"],
+        quantiles=[0.1, 0.5, 0.9],
+    )
+
+    assert np.isclose(result.loc[index[0], "weather_weighted_q_t2m_C_q10"], 10.0)
+    assert np.isclose(result.loc[index[0], "weather_weighted_q_t2m_C_q50"], 30.0)
+    assert np.isclose(result.loc[index[1], "weather_weighted_q_t2m_C_q90"], 60.0)
+
+
 def test_weighted_weather_inertia_features_add_rolling_history() -> None:
     index = pd.date_range("2026-01-01T00:00:00+01:00", periods=12, freq="15min")
     features = pd.DataFrame({"weather_weighted_t2m_C": np.arange(len(index), dtype=float)}, index=index)
