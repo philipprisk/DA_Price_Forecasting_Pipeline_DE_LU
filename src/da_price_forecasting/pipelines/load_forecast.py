@@ -93,10 +93,54 @@ def _combine_timestamp_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     non_empty_frames = [frame for frame in frames if frame is not None and not frame.empty]
     if not non_empty_frames:
         return pd.DataFrame()
-    df = pd.concat(non_empty_frames).sort_index()
+    df = pd.concat(non_empty_frames)
     df = df.loc[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
     df.index.name = "timestamp"
     return df
+
+
+def _local_days(start: pd.Timestamp, end: pd.Timestamp, target_tz: str) -> pd.DatetimeIndex:
+    start_day = start.tz_convert(target_tz).normalize()
+    end_day = end.tz_convert(target_tz).normalize()
+    if start_day > end_day:
+        return pd.DatetimeIndex([], tz=target_tz)
+    return pd.date_range(start_day, end_day, freq="D", tz=target_tz)
+
+
+def _actual_load_days_below_count(
+    actual: pd.DataFrame,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    target_tz: str,
+    min_count: int,
+) -> list[pd.Timestamp]:
+    days = _local_days(start, end, target_tz)
+    if not len(days):
+        return []
+    if actual.empty or "load_actual" not in actual.columns:
+        return list(days)
+
+    local_index = pd.DatetimeIndex(actual.index).tz_convert(target_tz)
+    counts = actual["load_actual"].notna().groupby(local_index.normalize()).sum()
+    return [day for day in days if int(counts.get(day, 0)) < min_count]
+
+
+def _group_consecutive_days(days: list[pd.Timestamp]) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if not days:
+        return []
+    sorted_days = sorted(pd.Timestamp(day) for day in days)
+    ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    start = previous = sorted_days[0]
+    for day in sorted_days[1:]:
+        if day == previous + pd.Timedelta(days=1):
+            previous = day
+            continue
+        ranges.append((start, previous))
+        start = previous = day
+    ranges.append((start, previous))
+    return ranges
 
 
 def _load_or_fetch_windowed_cache(
@@ -162,6 +206,35 @@ def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForec
             chunk_days=config.chunk_days,
         ),
     )
+
+    full_actual_end = end
+    if isinstance(config, LoadForecastModelConfig):
+        full_actual_end = min(end, _latest_operational_actual_day(config.target_tz))
+    repair_days = _actual_load_days_below_count(
+        actual,
+        start=start,
+        end=full_actual_end,
+        target_tz=config.target_tz,
+        min_count=96,
+    )
+    if repair_days:
+        fetched_repairs = [
+            fetch_actual_load(
+                start_day=repair_start,
+                end_day=repair_end,
+                country_code=config.country_code_entsoe,
+                api_key_env=config.entsoe_api_key_env,
+                target_tz=config.target_tz,
+                chunk_days=config.chunk_days,
+                require_complete_days=True,
+            )
+            for repair_start, repair_end in _group_consecutive_days(repair_days)
+        ]
+        cached = _load_timestamp_csv(config.actual_load_file, config.target_tz) if config.actual_load_file.exists() else actual
+        combined = _combine_timestamp_frames([cached, *fetched_repairs])
+        _save_timestamp_csv(combined, config.actual_load_file)
+        actual = _restrict_timestamp_window(combined, start, end, config.target_tz)
+
     if isinstance(config, LoadForecastModelConfig):
         refresh_day = _partial_load_refresh_day(config, end)
         if refresh_day is not None:
@@ -172,6 +245,7 @@ def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForec
                 api_key_env=config.entsoe_api_key_env,
                 target_tz=config.target_tz,
                 chunk_days=config.chunk_days,
+                require_complete_days=False,
             )
             if not fetched.empty:
                 cached = _load_timestamp_csv(config.actual_load_file, config.target_tz) if config.actual_load_file.exists() else actual

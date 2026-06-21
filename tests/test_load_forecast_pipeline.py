@@ -81,15 +81,10 @@ def test_actual_load_fetch_refreshes_current_partial_day(monkeypatch, tmp_path: 
     )
 
     actual_file = tmp_path / "actual_load.csv"
-    cached_index = pd.to_datetime(
-        [
-            "2026-05-20T00:00:00+02:00",
-            "2026-05-21T00:00:00+02:00",
-            "2026-05-22T00:00:00+02:00",
-        ],
-        utc=True,
-    ).tz_convert("Europe/Berlin")
-    pd.DataFrame({"load_actual": [1.0, 2.0, 3.0]}, index=cached_index).to_csv(actual_file)
+    cached_index = pd.date_range("2026-05-20T00:00:00+02:00", periods=2 * 96, freq="15min")
+    cached = pd.DataFrame({"load_actual": np.arange(len(cached_index), dtype=float)}, index=cached_index)
+    cached.loc[pd.Timestamp("2026-05-22T00:00:00+02:00"), "load_actual"] = 3.0
+    cached.to_csv(actual_file)
 
     fetched_index = pd.to_datetime(["2026-05-22T10:15:00+02:00"], utc=True).tz_convert("Europe/Berlin")
     fetched = pd.DataFrame({"load_actual": [99.0]}, index=fetched_index)
@@ -116,7 +111,49 @@ def test_actual_load_fetch_refreshes_current_partial_day(monkeypatch, tmp_path: 
 
     assert len(calls) == 1
     assert calls[0]["start_day"] == pd.Timestamp("2026-05-22", tz="Europe/Berlin")
+    assert calls[0]["require_complete_days"] is False
     assert result.loc[fetched_index[0], "load_actual"] == 99.0
+
+
+def test_actual_load_fetch_repairs_cached_nan_days(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        lf,
+        "_current_operational_day",
+        lambda target_tz: pd.Timestamp("2026-05-22", tz=target_tz),
+    )
+
+    actual_file = tmp_path / "actual_load.csv"
+    cached_index = pd.date_range("2026-05-20T00:00:00+02:00", periods=2 * 96, freq="15min")
+    cached = pd.DataFrame({"load_actual": np.nan}, index=cached_index)
+    cached.loc[cached_index.normalize() == pd.Timestamp("2026-05-21", tz="Europe/Berlin"), "load_actual"] = 42.0
+    cached.to_csv(actual_file)
+
+    repaired_index = pd.date_range("2026-05-20T00:00:00+02:00", periods=96, freq="15min")
+    repaired = pd.DataFrame({"load_actual": np.arange(96, dtype=float)}, index=repaired_index)
+    calls = []
+
+    def fake_fetch_actual_load(**kwargs):
+        calls.append(kwargs)
+        return repaired
+
+    monkeypatch.setattr(lf, "fetch_actual_load", fake_fetch_actual_load)
+
+    config = _config(
+        tmp_path,
+        actual_load_file=actual_file,
+        entsoe_start_date=date(2026, 5, 20),
+        entsoe_end_date=date(2026, 5, 21),
+        include_partial_load_features=False,
+    )
+
+    result = lf._load_or_fetch_actual_load(config)
+
+    assert len(calls) == 1
+    assert calls[0]["start_day"] == pd.Timestamp("2026-05-20", tz="Europe/Berlin")
+    assert calls[0]["end_day"] == pd.Timestamp("2026-05-20", tz="Europe/Berlin")
+    assert calls[0]["require_complete_days"] is True
+    assert result.loc[repaired_index[0], "load_actual"] == 0.0
+    assert result.loc[repaired_index[-1], "load_actual"] == 95.0
 
 
 def test_build_load_forecast_dataset_adds_calendar_lags_and_weather(monkeypatch, tmp_path: Path) -> None:

@@ -22,7 +22,13 @@ def _require_api_key(env_var: str) -> str:
     return api_key
 
 
-def _expand_hourly_series_to_quarter_hour(series: pd.Series, target_tz: str, value_name: str) -> pd.DataFrame:
+def _expand_hourly_series_to_quarter_hour(
+    series: pd.Series,
+    target_tz: str,
+    value_name: str,
+    *,
+    require_complete_days: bool = True,
+) -> pd.DataFrame:
     if series.empty:
         raise ValueError(f"No data returned for '{value_name}'.")
 
@@ -34,9 +40,10 @@ def _expand_hourly_series_to_quarter_hour(series: pd.Series, target_tz: str, val
     )
     series_15 = series.reindex(full_index).ffill(limit=3)
 
-    expected_counts = pd.Series(1, index=full_index).groupby(full_index.normalize()).transform("count")
-    actual_counts = series_15.groupby(series_15.index.normalize()).transform("count")
-    series_15 = series_15.where(actual_counts >= expected_counts)
+    if require_complete_days:
+        expected_counts = pd.Series(1, index=full_index).groupby(full_index.normalize()).transform("count")
+        actual_counts = series_15.groupby(series_15.index.normalize()).transform("count")
+        series_15 = series_15.where(actual_counts >= expected_counts)
 
     return series_15.to_frame(name=value_name).rename_axis("timestamp").sort_index()
 
@@ -244,6 +251,7 @@ def fetch_actual_load(
     api_key_env: str = "ENTSOE_API_KEY",
     target_tz: str = "Europe/Berlin",
     chunk_days: int = 90,
+    require_complete_days: bool = True,
 ) -> pd.DataFrame:
     """Fetch actual total load as a 15-minute Europe/Berlin series."""
     client = EntsoePandasClient(api_key=_require_api_key(api_key_env))
@@ -275,6 +283,7 @@ def fetch_actual_load(
         raw_series,
         target_tz=target_tz,
         value_name="load_actual",
+        require_complete_days=require_complete_days,
     )
     return _restrict_calendar_window(df_actual_load_15, start_day, end_day, target_tz)
 
