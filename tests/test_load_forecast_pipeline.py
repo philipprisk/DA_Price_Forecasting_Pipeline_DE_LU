@@ -156,6 +156,36 @@ def test_actual_load_fetch_repairs_cached_nan_days(monkeypatch, tmp_path: Path) 
     assert result.loc[repaired_index[-1], "load_actual"] == 95.0
 
 
+def test_actual_load_repair_accepts_complete_dst_spring_day() -> None:
+    index = pd.date_range(
+        pd.Timestamp("2026-03-29", tz="Europe/Berlin"),
+        pd.Timestamp("2026-03-30", tz="Europe/Berlin"),
+        freq="15min",
+        inclusive="left",
+    )
+    actual = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+
+    repair_days = lf._actual_load_days_below_count(
+        actual,
+        start=pd.Timestamp("2026-03-29", tz="Europe/Berlin"),
+        end=pd.Timestamp("2026-03-29", tz="Europe/Berlin"),
+        target_tz="Europe/Berlin",
+    )
+
+    assert len(index) == 92
+    assert repair_days == []
+
+    actual.iloc[-1, 0] = np.nan
+    repair_days = lf._actual_load_days_below_count(
+        actual,
+        start=pd.Timestamp("2026-03-29", tz="Europe/Berlin"),
+        end=pd.Timestamp("2026-03-29", tz="Europe/Berlin"),
+        target_tz="Europe/Berlin",
+    )
+
+    assert repair_days == [pd.Timestamp("2026-03-29", tz="Europe/Berlin")]
+
+
 def test_build_load_forecast_dataset_adds_calendar_lags_and_weather(monkeypatch, tmp_path: Path) -> None:
     index = pd.date_range("2026-01-01T00:00:00+01:00", periods=10 * 96, freq="15min")
     actual = pd.DataFrame({"load_actual": 50_000.0 + np.arange(len(index), dtype=float)}, index=index)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import timedelta
 
 import pandas as pd
 from entsoe import EntsoePandasClient, EntsoeRawClient
@@ -33,8 +34,8 @@ def _expand_hourly_series_to_quarter_hour(
         raise ValueError(f"No data returned for '{value_name}'.")
 
     full_index = pd.date_range(
-        start=series.index.min().normalize(),
-        end=series.index.max().normalize() + pd.Timedelta(days=1) - pd.Timedelta(minutes=15),
+        start=_local_day_start(series.index.min(), target_tz),
+        end=_next_local_day_start(series.index.max(), target_tz) - pd.Timedelta(minutes=15),
         freq="15min",
         tz=target_tz,
     )
@@ -49,8 +50,8 @@ def _expand_hourly_series_to_quarter_hour(
 
 
 def _restrict_calendar_window(df: pd.DataFrame, start_day: pd.Timestamp, end_day: pd.Timestamp, target_tz: str) -> pd.DataFrame:
-    start_cut = start_day.tz_convert(target_tz).normalize()
-    end_cut = end_day.tz_convert(target_tz).normalize() + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    start_cut = _local_day_start(start_day, target_tz)
+    end_cut = _next_local_day_start(end_day, target_tz) - pd.Timedelta(minutes=15)
     return df.loc[start_cut:end_cut]
 
 
@@ -69,6 +70,16 @@ def _as_target_tz(timestamp: pd.Timestamp, target_tz: str) -> pd.Timestamp:
     if timestamp.tz is None:
         return timestamp.tz_localize(target_tz)
     return timestamp.tz_convert(target_tz)
+
+
+def _local_day_start(timestamp: pd.Timestamp, target_tz: str) -> pd.Timestamp:
+    local_timestamp = _as_target_tz(timestamp, target_tz)
+    return pd.Timestamp(local_timestamp.date(), tz=target_tz)
+
+
+def _next_local_day_start(timestamp: pd.Timestamp, target_tz: str) -> pd.Timestamp:
+    local_timestamp = _as_target_tz(timestamp, target_tz)
+    return pd.Timestamp(local_timestamp.date() + timedelta(days=1), tz=target_tz)
 
 
 def _first_numeric_series(
@@ -233,8 +244,8 @@ def fetch_load_forecast(
     """Fetch DE-LU day-ahead load forecast as a 15-minute Europe/Berlin series."""
     client = EntsoePandasClient(api_key=_require_api_key(api_key_env))
 
-    query_start = start_day.tz_convert(target_tz)
-    query_end = (end_day + pd.Timedelta(days=1)).tz_convert(target_tz)
+    query_start = _local_day_start(start_day, target_tz)
+    query_end = _next_local_day_start(end_day, target_tz)
 
     obj = client.query_load_forecast(country_code, start=query_start, end=query_end)
     series = _first_numeric_series(obj, "load forecast", preferred_tokens=("forecast",))
@@ -259,11 +270,11 @@ def fetch_actual_load(
     end_day = _as_target_tz(end_day, target_tz)
 
     all_series = []
-    current_start = start_day.normalize()
+    current_start = _local_day_start(start_day, target_tz)
     while current_start <= end_day:
         current_end = min(current_start + pd.Timedelta(days=chunk_days - 1), end_day)
-        query_start = current_start.tz_convert(target_tz)
-        query_end = (current_end + pd.Timedelta(days=1)).tz_convert(target_tz)
+        query_start = _local_day_start(current_start, target_tz)
+        query_end = _next_local_day_start(current_end, target_tz)
 
         obj = client.query_load(country_code, start=query_start, end=query_end)
         if obj is not None and not obj.empty:
@@ -272,7 +283,7 @@ def fetch_actual_load(
                 series = series.tz_localize("UTC")
             all_series.append(series.tz_convert(target_tz).rename("load_actual"))
 
-        current_start = current_end + pd.Timedelta(days=1)
+        current_start = _next_local_day_start(current_end, target_tz)
 
     if not all_series:
         raise ValueError("No actual load data returned by the ENTSO-E API.")

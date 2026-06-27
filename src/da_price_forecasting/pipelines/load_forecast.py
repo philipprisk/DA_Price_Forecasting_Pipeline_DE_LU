@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import warnings
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -84,8 +85,8 @@ def _restrict_timestamp_window(
 ) -> pd.DataFrame:
     if df.empty:
         return df
-    start_cut = start.tz_convert(target_tz).normalize()
-    end_cut = end.tz_convert(target_tz).normalize() + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    start_cut = _local_day_start(start, target_tz)
+    end_cut = _next_local_day_start(end, target_tz) - pd.Timedelta(minutes=15)
     return df.loc[start_cut:end_cut]
 
 
@@ -100,12 +101,28 @@ def _combine_timestamp_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return df
 
 
+def _local_day_start(timestamp: pd.Timestamp, target_tz: str) -> pd.Timestamp:
+    local_timestamp = pd.Timestamp(timestamp).tz_convert(target_tz)
+    return pd.Timestamp(local_timestamp.date(), tz=target_tz)
+
+
+def _next_local_day_start(timestamp: pd.Timestamp, target_tz: str) -> pd.Timestamp:
+    local_timestamp = pd.Timestamp(timestamp).tz_convert(target_tz)
+    return pd.Timestamp(local_timestamp.date() + timedelta(days=1), tz=target_tz)
+
+
 def _local_days(start: pd.Timestamp, end: pd.Timestamp, target_tz: str) -> pd.DatetimeIndex:
-    start_day = start.tz_convert(target_tz).normalize()
-    end_day = end.tz_convert(target_tz).normalize()
+    start_day = _local_day_start(start, target_tz)
+    end_day = _local_day_start(end, target_tz)
     if start_day > end_day:
         return pd.DatetimeIndex([], tz=target_tz)
     return pd.date_range(start_day, end_day, freq="D", tz=target_tz)
+
+
+def _expected_quarter_hours_for_local_day(day: pd.Timestamp, target_tz: str) -> int:
+    day_start = _local_day_start(day, target_tz)
+    next_day_start = _next_local_day_start(day, target_tz)
+    return len(pd.date_range(day_start, next_day_start, freq="15min", inclusive="left"))
 
 
 def _actual_load_days_below_count(
@@ -114,7 +131,6 @@ def _actual_load_days_below_count(
     start: pd.Timestamp,
     end: pd.Timestamp,
     target_tz: str,
-    min_count: int,
 ) -> list[pd.Timestamp]:
     days = _local_days(start, end, target_tz)
     if not len(days):
@@ -124,7 +140,11 @@ def _actual_load_days_below_count(
 
     local_index = pd.DatetimeIndex(actual.index).tz_convert(target_tz)
     counts = actual["load_actual"].notna().groupby(local_index.normalize()).sum()
-    return [day for day in days if int(counts.get(day, 0)) < min_count]
+    return [
+        day
+        for day in days
+        if int(counts.get(day, 0)) < _expected_quarter_hours_for_local_day(day, target_tz)
+    ]
 
 
 def _group_consecutive_days(days: list[pd.Timestamp]) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
@@ -134,7 +154,7 @@ def _group_consecutive_days(days: list[pd.Timestamp]) -> list[tuple[pd.Timestamp
     ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     start = previous = sorted_days[0]
     for day in sorted_days[1:]:
-        if day == previous + pd.Timedelta(days=1):
+        if day.date() == previous.date() + timedelta(days=1):
             previous = day
             continue
         ranges.append((start, previous))
@@ -215,7 +235,6 @@ def _load_or_fetch_actual_load(config: LoadForecastModelConfig | EntsoeLoadForec
         start=start,
         end=full_actual_end,
         target_tz=config.target_tz,
-        min_count=96,
     )
     if repair_days:
         fetched_repairs = [
