@@ -178,6 +178,16 @@ def rolling_point_forecast(
             y_tr = Y.loc[train_mask, mtu]
             X_te = X.loc[test_mask]
 
+            finite_target_mask = np.isfinite(y_tr.to_numpy(dtype=float))
+            if finite_target_mask.sum() < 5:
+                raise ValueError(
+                    "Not enough finite training targets for "
+                    f"{day.date()} MTU {mtu}: {int(finite_target_mask.sum())} available."
+                )
+            if not finite_target_mask.all():
+                X_tr = X_tr.loc[finite_target_mask]
+                y_tr = y_tr.loc[finite_target_mask]
+
             X_tr_s, X_te_s, y_tr_s, _, y_params = scale_fold_point(
                 X_tr=X_tr,
                 X_va=X_te,
